@@ -349,9 +349,9 @@ Conclusion
 
 
 This project demonstrates how MCP Resources and Prompts can be integrated into a Groq-powered AI assistant.
-
 Instead of manually selecting a document and prompt, the user asks a natural-language question.
-
 The Groq agent determines which MCP capabilities are relevant, Python executes the requested operations, and the retrieved information is used to generate a grounded response.
-
 The result is a lightweight proof of concept for understanding MCP integration and AI agent tool calling.
+
+Video Link: [Screencast from 27-10-26 04:48:55 PM IST.webm](https://github.com/user-attachments/assets/c49cbdfb-dbef-4b65-bbe5-dc317f94218b)
+
