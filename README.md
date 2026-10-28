@@ -278,80 +278,29 @@ Run:
 python client.py
 ```
 
-Expected startup output:
+This works without Groq and demonstrates MCP discovery, resource reading and prompt retrieval.
 
-```text
-========================================
-          MCP AI ASSISTANT
-========================================
-Connected successfully.
-Ask a question about the project.
-Type 'exit' to quit.
+To enable live generation:
+
+```bash
+export GROQ_API_KEY="your_key_here"
+python client.py
 ```
 
-The MCP client starts the server using stdio and establishes the connection automatically.
+`GROQ_MODEL` defaults to `llama-3.3-70b-versatile` and can be changed with an environment variable.
 
-## 9. Agent Execution Example
+## Optional MCP Inspector
 
-User question:
-
-```text
-Summarize the project's requirements for my manager.
+```bash
+npx -y @modelcontextprotocol/inspector
 ```
 
-Example output:
+Connect using `stdio`, command set to your virtual environment's **absolute** Python path, and arguments set to the **absolute** path of `server.py`. Alternatively, with `uv` installed run `uv run mcp dev server.py`.
 
-```text
-AGENT ACTIVITY
-----------------------------------------
+## Demo notes
 
-[1] Reading: Project Requirements
-    Tool: read_mcp_resource
-    Status: Completed
-
-[2] Getting Instructions: Summarize Project
-    Tool: get_mcp_prompt
-    Audience: manager
-    Status: Completed
-
-AI RESPONSE
-----------------------------------------
-
-The project aims to build a document
-assistant that allows employees to upload
-PDF documents and ask questions.
-
-Key requirements include:
-- PDF upload
-- Document-based question answering
-- Source references
-- Handling missing information
-
-----------------------------------------
-Sources: Requirements
-Prompt: Summarize Project
-========================================
-```
-
-## 10. Key Learnings
-
-This POC demonstrates:
-
-1. **MCP Resources** expose reusable information.
-2. **MCP Prompts** expose reusable instructions.
-3. **MCP Clients** discover and retrieve server capabilities.
-4. **Groq agents** dynamically select tools using LLM reasoning.
-5. **Python adapters** bridge Groq function calls with MCP operations.
-6. **Agent orchestration** ensures mandatory steps are completed.
-7. **Resource content** can change independently of agent code.
-
-Conclusion
-
-
-This project demonstrates how MCP Resources and Prompts can be integrated into a Groq-powered AI assistant.
-Instead of manually selecting a document and prompt, the user asks a natural-language question.
-The Groq agent determines which MCP capabilities are relevant, Python executes the requested operations, and the retrieved information is used to generate a grounded response.
-The result is a lightweight proof of concept for understanding MCP integration and AI agent tool calling.
-
-Video Link: [Screencast from 27-10-26 04:48:55 PM IST.webm](https://github.com/user-attachments/assets/c49cbdfb-dbef-4b65-bbe5-dc317f94218b)
-
+- Resources: `project://requirements` and `project://architecture`.
+- Prompts: `summarize_project` and `explain_technical`.
+- To demonstrate updated context, modify `data/requirements.md` and run `python client.py` again.
+- To demonstrate another resource/prompt combination, change the URI and prompt selected in `client.py`.
+- No frontend, database, vector index, or production deployment.

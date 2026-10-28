@@ -3,16 +3,12 @@
 
 import asyncio
 import sys
-from pathlib import Path
+from constants.paths import SERVER_PATH
 
 from groq import APIConnectionError, APIStatusError
 from mcp import Client, StdioServerParameters
 
 from agent import run_agent
-
-
-BASE_DIR = Path(__file__).resolve().parent
-SERVER_PATH = BASE_DIR / "server.py"
 
 
 def display_response(
