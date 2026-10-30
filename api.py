@@ -20,6 +20,7 @@ from agent import run_agent
 from models.agent_config import AgentConfig
 from server import mcp
 from services.agent_registry import AgentRegistry
+from services.default_assistant import DefaultAssistant
 from services.mcp_cache import mcp_cache
 from services.mcp_discovery import (
     MCPCapabilities,
@@ -39,7 +40,6 @@ app = FastAPI(
     ),
     version="0.4.0",
 )
-
 
 # Allowed frontend origins for local and deployed environments.
 cors_origins = [
@@ -64,8 +64,9 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+
 class ChatRequest(BaseModel):
-    """Represent a custom agent chat request.
+    """Represent a default or custom agent chat request.
 
     Attributes:
         message (str): User's question.
@@ -75,7 +76,7 @@ class ChatRequest(BaseModel):
     Functions:
         validate_message: Validate and normalize the message.
         validate_agent_id: Normalize the saved agent identifier.
-        validate_agent_selection: Require exactly one agent source.
+        validate_agent_selection: Reject conflicting agent sources.
     """
 
     message: str = Field(
@@ -143,25 +144,25 @@ class ChatRequest(BaseModel):
 
         return value
 
-    @model_validator(mode="after")
-    def validate_agent_selection(self) -> "ChatRequest":
-        """Require exactly one agent selection method.
+@model_validator(mode="after")
+def validate_agent_selection(self) -> "ChatRequest":
+    """Validate mutually exclusive agent selection.
 
-        Args:
-            None: Uses the current request fields.
+    Args:
+        None.
 
-        Returns:
-            ChatRequest: Validated request.
+    Returns:
+        ChatRequest: Validated request.
 
-        Raises:
-            ValueError: If both or neither agent source is provided.
-        """
-        if (self.agent_id is None) == (self.agent is None):
-            raise ValueError(
-                "Provide exactly one of agent_id or agent."
-            )
+    Raises:
+        ValueError: If both agent selection fields are provided.
+    """
+    if self.agent_id is not None and self.agent is not None:
+        raise ValueError(
+            "Provide either agent_id or agent, not both."
+        )
 
-        return self
+    return self
 
 
 class ExecutionEvent(BaseModel):
@@ -191,7 +192,7 @@ class ExecutionEvent(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    """Represent a custom agent's response.
+    """Represent an assistant's response.
 
     Attributes:
         answer (str): Final generated answer.
@@ -477,13 +478,12 @@ async def get_mcp_capabilities() -> MCPCapabilities:
         ) from exc
 
 
-# Custom agent execution
 @app.post(
     "/api/chat",
     response_model=ChatResponse,
 )
 async def chat(request: ChatRequest) -> ChatResponse:
-    """Execute a saved or legacy inline custom agent.
+    """Execute the default assistant or a custom MCP agent.
 
     Args:
         request (ChatRequest): Message and agent selection.
@@ -495,6 +495,37 @@ async def chat(request: ChatRequest) -> ChatResponse:
         HTTPException: If the agent is missing, invalid,
             or execution fails.
     """
+    # Default chat is available without selecting an agent.
+    # No MCP client or custom agent is initialized here.
+    if request.agent_id is None and request.agent is None:
+        try:
+            assistant = DefaultAssistant()
+
+            answer = await assistant.chat(
+                request.message
+            )
+
+            return ChatResponse(
+                answer=answer,
+                events=[],
+            )
+
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            ) from exc
+
+        except Exception as exc:
+            logger.exception(
+                "Default Assistant execution failed"
+            )
+
+            raise HTTPException(
+                status_code=502,
+                detail="Unable to execute the Default Assistant.",
+            ) from exc
+
     # Load saved agent from SQLite when agent_id is provided.
     if request.agent_id is not None:
         try:
