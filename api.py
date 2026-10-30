@@ -1,6 +1,7 @@
 
 """Expose custom Groq agents and MCP capabilities through FastAPI."""
 
+import os
 import logging
 import sqlite3
 from typing import Literal
@@ -39,12 +40,20 @@ app = FastAPI(
     version="0.4.0",
 )
 
+
+# Allowed frontend origins for local and deployed environments.
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=False,
     allow_methods=[
         "GET",

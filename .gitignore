@@ -1,8 +1,16 @@
-.venv/
 .env
+.env.*
+!.env.example
+
+.venv/
 __pycache__/
 .pytest_cache/
-*.pyc
-data/
 
+*.db
+*.db-shm
+*.db-wal
+
+node_modules/
+
+tests/__pycache__/
 tests/ 
