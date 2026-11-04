@@ -3,7 +3,7 @@
 
 from pydantic import BaseModel, Field
 from mcp import Client
-
+from services.tool_registry import ToolRegistry
 
 class MCPToolInfo(BaseModel):
     """Represent a discovered MCP tool.
@@ -125,4 +125,48 @@ async def discover_mcp_capabilities(
         tools=tools,
         resources=resources,
         prompts=prompts,
+    )
+
+def filter_enabled_capabilities(
+    capabilities: MCPCapabilities,
+    registry: ToolRegistry,
+) -> MCPCapabilities:
+    """Filter discovered capabilities using Admin tool settings.
+
+    Args:
+        capabilities (MCPCapabilities): Raw MCP capabilities.
+        registry (ToolRegistry): Persistent tool registry.
+
+    Returns:
+        MCPCapabilities: Capabilities permitted by Admin settings.
+
+    Raises:
+        sqlite3.Error: If registry access fails.
+    """
+    enabled_tools = [
+        tool
+        for tool in capabilities.tools
+        if registry.is_enabled(tool.name)
+    ]
+
+    resources_enabled = registry.is_enabled(
+        "read_mcp_resource"
+    )
+
+    prompts_enabled = registry.is_enabled(
+        "get_mcp_prompt"
+    )
+
+    return MCPCapabilities(
+        tools=enabled_tools,
+        resources=(
+            capabilities.resources
+            if resources_enabled
+            else []
+        ),
+        prompts=(
+            capabilities.prompts
+            if prompts_enabled
+            else []
+        ),
     )

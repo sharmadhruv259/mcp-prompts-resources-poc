@@ -5,9 +5,11 @@ import os
 import logging
 import sqlite3
 from typing import Literal
+from fastapi import Depends
 
 from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from auth.routes import router as auth_router
 from mcp import Client
 from pydantic import (
     BaseModel,
@@ -16,21 +18,34 @@ from pydantic import (
     model_validator,
 )
 
-from agent import run_agent
+from agent import AgentAuthorizationError, run_agent
 from models.agent_config import AgentConfig
 from server import mcp
 from services.agent_registry import AgentRegistry
 from services.default_assistant import DefaultAssistant
-from services.mcp_cache import mcp_cache
 from services.mcp_discovery import (
     MCPCapabilities,
     discover_mcp_capabilities,
+    filter_enabled_capabilities,
 )
-
+from services.tool_registry import tool_registry
+from auth.dependencies import current_user
+from auth.permissions import Role
+from models.user import User
+from auth.permissions import has_permission
+from auth.admin_routes import router as admin_router
+from auth.user_management_routes import (
+    router as user_management_router,
+)
+from auth.tool_management_routes import (
+    router as tool_management_router,
+)
 
 logger = logging.getLogger(__name__)
 
-registry = AgentRegistry()
+registry = AgentRegistry(
+    db_path=os.getenv("DATABASE_PATH", "data/agents.db")
+)
 
 app = FastAPI(
     title="MCP Playground API",
@@ -40,6 +55,10 @@ app = FastAPI(
     ),
     version="0.4.0",
 )
+app.include_router(auth_router)
+app.include_router(admin_router)
+app.include_router(user_management_router)
+app.include_router(tool_management_router)
 
 # Allowed frontend origins for local and deployed environments.
 cors_origins = [
@@ -59,10 +78,28 @@ app.add_middleware(
         "GET",
         "POST",
         "PUT",
+        "PATCH",
         "DELETE",
+        "OPTIONS",
     ],
-    allow_headers=["Content-Type"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+    ],
 )
+
+
+
+class AgentUpdateRequest(BaseModel):
+    """Represent a version-controlled agent update request.
+
+    Attributes:
+        agent (AgentConfig): Replacement agent configuration.
+        expected_version (int): Version expected by the client.
+    """
+
+    agent: AgentConfig
+    expected_version: int = Field(ge=1)
 
 
 class ChatRequest(BaseModel):
@@ -144,25 +181,29 @@ class ChatRequest(BaseModel):
 
         return value
 
-@model_validator(mode="after")
-def validate_agent_selection(self) -> "ChatRequest":
-    """Validate mutually exclusive agent selection.
+    @model_validator(mode="after")
+    def validate_agent_selection(self) -> "ChatRequest":
+        """Validate mutually exclusive agent selection.
 
-    Args:
-        None.
+        Args:
+            None.
 
-    Returns:
-        ChatRequest: Validated request.
+        Returns:
+            ChatRequest: Validated chat request.
 
-    Raises:
-        ValueError: If both agent selection fields are provided.
-    """
-    if self.agent_id is not None and self.agent is not None:
-        raise ValueError(
-            "Provide either agent_id or agent, not both."
-        )
+        Raises:
+            ValueError: If both agent selection fields are provided.
+        """
+        if (
+            self.agent_id is not None
+            and self.agent is not None
+        ):
+            raise ValueError(
+                "Provide either agent_id or agent, not both."
+            )
 
-    return self
+        return self
+
 
 
 class ExecutionEvent(BaseModel):
@@ -209,6 +250,16 @@ class ChatResponse(BaseModel):
     )
 
 
+class AgentReviewRequest(BaseModel):
+    """Represent an agent approval workflow request.
+
+    Attributes:
+        expected_version (int): Agent configuration version being reviewed.
+    """
+
+    expected_version: int = Field(ge=1)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Return backend process health.
@@ -227,29 +278,33 @@ async def health() -> dict[str, str]:
     }
 
 
+
 @app.post(
     "/api/agents",
     response_model=AgentConfig,
     status_code=status.HTTP_201_CREATED,
 )
-def create_agent(agent: AgentConfig) -> AgentConfig:
-    """Create and persist a custom AI agent.
+def create_agent(
+    agent: AgentConfig,
+    user: User = Depends(current_user),
+) -> AgentConfig:
+    """Create a draft AI agent owned by the authenticated user.
 
     Args:
-        agent (AgentConfig): New agent configuration.
+        agent (AgentConfig): Submitted agent configuration.
+        user (User): Authenticated agent creator.
 
     Returns:
         AgentConfig: Saved agent configuration.
 
     Raises:
-        HTTPException: If the agent exists or persistence fails.
+        HTTPException: If the agent already exists or storage fails.
     """
     try:
-        saved_agent = registry.create_agent(agent)
-
-        # Clear stale cache entries if this agent ID
-        # was previously used and then deleted.
-        mcp_cache.invalidate_agent(saved_agent.id)
+        saved_agent = registry.create_agent(
+            agent=agent,
+            owner_id=user.id,
+        )
 
         return saved_agent
 
@@ -275,69 +330,91 @@ def create_agent(agent: AgentConfig) -> AgentConfig:
     "/api/agents",
     response_model=list[AgentConfig],
 )
-def list_agents() -> list[AgentConfig]:
-    """Retrieve all saved custom agents.
+def list_agents(
+    user: User = Depends(current_user),
+) -> list[AgentConfig]:
+    """List agents accessible to the authenticated user.
 
     Args:
-        None.
+        user (User): Authenticated user requesting agents.
 
     Returns:
-        list[AgentConfig]: Saved agent configurations.
+        list[AgentConfig]: Agent configurations visible to the user.
 
     Raises:
-        HTTPException: If database retrieval fails.
+        sqlite3.Error: If database retrieval fails.
     """
-    try:
+    if user.role == Role.ADMIN:
         return registry.list_agents()
 
-    except sqlite3.Error as exc:
-        logger.exception(
-            "Failed to list agents"
-        )
+    records = registry.list_agent_records(
+        owner_id=user.id
+    )
 
-        raise HTTPException(
-            status_code=500,
-            detail="Unable to retrieve agents.",
-        ) from exc
+    return [
+        record["configuration"]
+        for record in records
+    ]
+
+
+@app.get("/api/agents/records")
+def list_agent_records(
+    user: User = Depends(current_user),
+) -> list[dict]:
+    """List agent records with approval metadata.
+
+    Args:
+        user (User): Authenticated user requesting records.
+
+    Returns:
+        list[dict]: Agent records visible to the user.
+
+    Raises:
+        HTTPException: If access is denied.
+    """
+    if has_permission(user.role, "agents:review"):
+        return registry.list_agent_records()
+
+    return registry.list_agent_records(owner_id=user.id)
+
 
 
 @app.get(
     "/api/agents/{agent_id}",
     response_model=AgentConfig,
 )
-def get_agent(agent_id: str) -> AgentConfig:
-    """Retrieve a saved custom agent by ID.
+def get_agent(
+    agent_id: str,
+    user: User = Depends(current_user),
+) -> AgentConfig:
+    """Retrieve an agent accessible to the authenticated user.
 
     Args:
-        agent_id (str): Agent identifier.
+        agent_id (str): Identifier of the requested agent.
+        user (User): Authenticated user requesting the agent.
 
     Returns:
-        AgentConfig: Saved agent configuration.
+        AgentConfig: Authorized agent configuration.
 
     Raises:
-        HTTPException: If the agent is missing or retrieval fails.
+        HTTPException: If the agent does not exist or access is denied.
     """
-    try:
-        agent = registry.get_agent(agent_id)
+    record = registry.get_agent_record(agent_id)
 
-    except sqlite3.Error as exc:
-        logger.exception(
-            "Failed to retrieve agent: %s",
-            agent_id,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail="Unable to retrieve agent.",
-        ) from exc
-
-    if agent is None:
+    if record is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Agent not found: {agent_id}",
+            detail="Agent not found.",
         )
 
-    return agent
+    if user.role != Role.ADMIN and record["owner_id"] != user.id:
+        raise HTTPException(
+            status_code=404,
+            detail="Agent not found.",
+        )
+
+    return record["configuration"]
+
 
 
 @app.put(
@@ -346,32 +423,68 @@ def get_agent(agent_id: str) -> AgentConfig:
 )
 def update_agent(
     agent_id: str,
-    agent: AgentConfig,
+    request: AgentUpdateRequest,
+    user: User = Depends(current_user),
 ) -> AgentConfig:
-    """Update an existing custom agent.
+    """Update an owned agent with optimistic version checking.
 
     Args:
-        agent_id (str): Existing agent identifier.
-        agent (AgentConfig): Replacement configuration.
+        agent_id (str): Identifier of the agent to update.
+        request (AgentUpdateRequest): New configuration and expected version.
+        user (User): Authenticated user making the request.
 
     Returns:
-        AgentConfig: Updated agent configuration.
+        AgentConfig: Successfully updated agent configuration.
 
     Raises:
-        HTTPException: If the ID differs, agent is missing,
-            or persistence fails.
+        HTTPException: If the agent is inaccessible, the ID changes,
+            the version conflicts, or database persistence fails.
     """
+    agent = request.agent
+
     if agent.id != agent_id:
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail="Agent ID cannot be changed.",
         )
 
     try:
-        updated = registry.update_agent(
-            agent_id,
-            agent,
+        record = registry.get_agent_record(agent_id)
+
+        # Avoid revealing the existence of another user's agent.
+        if record is None or record["owner_id"] != user.id:
+            raise HTTPException(
+                status_code=404,
+                detail="Agent not found.",
+            )
+
+        if record["version"] != request.expected_version:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Agent configuration has changed. "
+                    "Reload the agent and retry with its current version."
+                ),
+            )
+
+        # Ownership and version are verified again atomically in SQL.
+        updated_agent = registry.update_agent(
+            agent_id=agent_id,
+            agent=agent,
+            owner_id=user.id,
+            expected_version=request.expected_version,
         )
+
+        if updated_agent is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Agent was modified or is no longer available. "
+                    "Reload the agent before retrying."
+                ),
+            )
+
+        return updated_agent
 
     except sqlite3.Error as exc:
         logger.exception(
@@ -384,63 +497,48 @@ def update_agent(
             detail="Unable to update agent.",
         ) from exc
 
-    if updated is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Agent not found: {agent_id}",
-        )
-
-    # Invalidate cached resources and prompts because
-    # the agent configuration may have changed.
-    mcp_cache.invalidate_agent(agent_id)
-
-    return updated
 
 
 @app.delete(
     "/api/agents/{agent_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-def delete_agent(agent_id: str) -> Response:
-    """Delete a saved custom agent.
+def delete_agent(
+    agent_id: str,
+    user: User = Depends(current_user),
+) -> Response:
+    """Delete an owned agent through the registry.
 
     Args:
-        agent_id (str): Agent identifier.
+        agent_id (str): Identifier of the agent to delete.
+        user (User): Authenticated user requesting deletion.
 
     Returns:
         Response: Empty HTTP 204 response.
 
     Raises:
-        HTTPException: If the agent is missing or deletion fails.
+        HTTPException: If the agent is inaccessible or deletion fails.
     """
     try:
         deleted = registry.delete_agent(
-            agent_id
+            agent_id=agent_id,
+            owner_id=user.id,
         )
+
+        if not deleted:
+            raise HTTPException(
+                status_code=404,
+                detail="Agent not found.",
+            )
+
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     except sqlite3.Error as exc:
-        logger.exception(
-            "Failed to delete agent: %s",
-            agent_id,
-        )
-
+        logger.exception("Failed to delete agent: %s", agent_id)
         raise HTTPException(
             status_code=500,
             detail="Unable to delete agent.",
         ) from exc
-
-    if not deleted:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Agent not found: {agent_id}",
-        )
-
-    # Remove cached MCP results for the deleted agent.
-    mcp_cache.invalidate_agent(agent_id)
-
-    return Response(
-        status_code=status.HTTP_204_NO_CONTENT,
-    )
 
 
 @app.get(
@@ -448,16 +546,16 @@ def delete_agent(agent_id: str) -> Response:
     response_model=MCPCapabilities,
 )
 async def get_mcp_capabilities() -> MCPCapabilities:
-    """Discover available MCP capabilities.
+    """Discover MCP capabilities enabled by an administrator.
 
     Args:
         None.
 
     Returns:
-        MCPCapabilities: Available tools, resources, and prompts.
+        MCPCapabilities: Enabled MCP tools, resources, and prompts.
 
     Raises:
-        HTTPException: If MCP discovery fails.
+        HTTPException: If MCP discovery or registry filtering fails.
     """
     try:
         async with Client(mcp) as client:
@@ -465,11 +563,16 @@ async def get_mcp_capabilities() -> MCPCapabilities:
                 client
             )
 
-        return capabilities
+            enabled_capabilities = filter_enabled_capabilities(
+                capabilities,
+                tool_registry,
+            )
+
+            return enabled_capabilities
 
     except Exception as exc:
         logger.exception(
-            "MCP capability discovery failed"
+            "Failed to discover enabled MCP capabilities."
         )
 
         raise HTTPException(
@@ -477,27 +580,39 @@ async def get_mcp_capabilities() -> MCPCapabilities:
             detail="Unable to discover MCP capabilities.",
         ) from exc
 
-
 @app.post(
     "/api/chat",
     response_model=ChatResponse,
 )
-async def chat(request: ChatRequest) -> ChatResponse:
-    """Execute the default assistant or a custom MCP agent.
+async def chat(
+    request: ChatRequest,
+    user: User = Depends(current_user),
+) -> ChatResponse:
+    """Execute the default assistant or an authorized approved agent.
 
     Args:
         request (ChatRequest): Message and agent selection.
+        user (User): Authenticated user requesting execution.
 
     Returns:
         ChatResponse: Generated answer and execution events.
 
     Raises:
-        HTTPException: If the agent is missing, invalid,
-            or execution fails.
+        HTTPException: If authentication, agent access,
+            approval validation, or execution fails.
     """
-    # Default chat is available without selecting an agent.
-    # No MCP client or custom agent is initialized here.
-    if request.agent_id is None and request.agent is None:
+    # Inline agent configurations must never bypass approval.
+    if request.agent is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Inline agent configurations are not supported. "
+                "Provide the ID of a saved, approved agent."
+            ),
+        )
+
+    # Preserve Default Assistant functionality for authenticated users.
+    if request.agent_id is None:
         try:
             assistant = DefaultAssistant()
 
@@ -526,41 +641,87 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 detail="Unable to execute the Default Assistant.",
             ) from exc
 
-    # Load saved agent from SQLite when agent_id is provided.
-    if request.agent_id is not None:
-        try:
-            selected_agent = registry.get_agent(
-                request.agent_id
-            )
-
-        except sqlite3.Error as exc:
-            logger.exception(
-                "Failed to load agent: %s",
-                request.agent_id,
-            )
-
-            raise HTTPException(
-                status_code=500,
-                detail="Unable to load the selected agent.",
-            ) from exc
-
-        if selected_agent is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Agent not found: {request.agent_id}",
-            )
-
-    else:
-        # Temporary backward compatibility with existing clients.
-        selected_agent = request.agent
-
-    if selected_agent is None:
-        raise HTTPException(
-            status_code=422,
-            detail="An agent must be selected.",
+    # Load the full record, including ownership and approval status.
+    try:
+        record = registry.get_agent_record(
+            request.agent_id
         )
 
+    except sqlite3.Error as exc:
+        logger.exception(
+            "Failed to load agent: %s",
+            request.agent_id,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to load the selected agent.",
+        ) from exc
+
+    # Only the owner or an Admin may access the agent.
+    # Return 404 for inaccessible agents to avoid exposing their IDs.
+    if record is None or (
+        record["owner_id"] != user.id
+        and user.role != Role.ADMIN
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Agent not found.",
+        )
+
+    # Approval is mandatory before execution.
+    if record["approval_status"] != "approved":
+        raise HTTPException(
+            status_code=403,
+            detail="Agent must be approved before execution.",
+        )
+
+    selected_agent = record["configuration"]
+    approved_version = record["version"]
+    approved_owner_id = record["owner_id"]
+    selected_agent_id = request.agent_id
+
+    async def validate_agent_authorization() -> None:
+        """Recheck saved-agent authorization against the current registry.
+
+        Args:
+            None.
+
+        Returns:
+            None: Agent remains approved, accessible, and unchanged.
+
+        Raises:
+            AgentAuthorizationError: If the agent was deleted, its
+                approval or owner changed, or its version changed.
+            sqlite3.Error: If the registry cannot be read.
+        """
+        current_record = registry.get_agent_record(selected_agent_id)
+
+        if current_record is None:
+            raise AgentAuthorizationError(
+                "Agent no longer exists."
+            )
+
+        if current_record["owner_id"] != approved_owner_id or (
+            current_record["owner_id"] != user.id
+            and user.role != Role.ADMIN
+        ):
+            raise AgentAuthorizationError(
+                "Agent ownership or access has changed."
+            )
+
+        if current_record["approval_status"] != "approved":
+            raise AgentAuthorizationError(
+                "Agent is no longer approved."
+            )
+
+        if current_record["version"] != approved_version:
+            raise AgentAuthorizationError(
+                "Agent configuration has changed."
+            )
+
     validation_error: str | None = None
+    authorization_error: str | None = None
     answer: str | None = None
     events: list[dict[str, str]] = []
 
@@ -571,11 +732,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     client=client,
                     question=request.message,
                     agent=selected_agent,
+                    agent_version=approved_version,
+                    validate_authorization=validate_agent_authorization,
                 )
 
+            except AgentAuthorizationError as exc:
+                # Catch authorization errors inside the MCP context.
+                authorization_error = str(exc)
+
             except ValueError as exc:
-                # Handle validation errors after exiting
-                # the MCP context manager.
                 validation_error = str(exc)
 
     except Exception as exc:
@@ -592,6 +757,19 @@ async def chat(request: ChatRequest) -> ChatResponse:
             ),
         ) from exc
 
+    if authorization_error is not None:
+        logger.warning(
+            "Agent authorization changed during execution: "
+            "agent_id=%s, version=%s",
+            selected_agent.id,
+            approved_version,
+        )
+
+        raise HTTPException(
+            status_code=403,
+            detail=authorization_error,
+        )
+
     if validation_error is not None:
         raise HTTPException(
             status_code=400,
@@ -603,7 +781,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
             "Agent returned no answer: agent_id=%s",
             selected_agent.id,
         )
-
         raise HTTPException(
             status_code=502,
             detail="Agent returned no answer.",
@@ -616,3 +793,223 @@ async def chat(request: ChatRequest) -> ChatResponse:
             for event in events
         ],
     )
+
+
+
+@app.post(
+    "/api/agents/{agent_id}/submit",
+    status_code=status.HTTP_200_OK,
+)
+def submit_agent_for_review(
+    agent_id: str,
+    request: AgentReviewRequest,
+    user: User = Depends(current_user),
+) -> dict:
+    """Submit an owned draft agent for approval.
+
+    Args:
+        agent_id (str): Identifier of the agent.
+        request (AgentReviewRequest): Expected configuration version.
+        user (User): Authenticated user submitting the agent.
+
+    Returns:
+        dict: Agent ID, approval status, and configuration version.
+
+    Raises:
+        HTTPException: If the agent is inaccessible, not a draft,
+            has changed version, or database submission fails.
+    """
+    try:
+        submitted = registry.submit_agent(
+            agent_id=agent_id,
+            owner_id=user.id,
+            expected_version=request.expected_version,
+        )
+
+        if not submitted:
+            record = registry.get_agent_record(agent_id)
+
+            if record is None or record["owner_id"] != user.id:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Agent not found.",
+                )
+
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Agent must be in draft status and "
+                    "the expected version must match."
+                ),
+            )
+
+        return {
+            "agent_id": agent_id,
+            "approval_status": "pending",
+            "version": request.expected_version,
+        }
+
+    except sqlite3.Error as exc:
+        logger.exception(
+            "Failed to submit agent: %s",
+            agent_id,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to submit agent for review.",
+        ) from exc
+
+@app.post(
+    "/api/agents/{agent_id}/approve",
+    status_code=status.HTTP_200_OK,
+)
+def approve_agent_for_review(
+    agent_id: str,
+    request: AgentReviewRequest,
+    user: User = Depends(current_user),
+) -> dict:
+    """Approve a pending agent using an authorized reviewer.
+
+    Args:
+        agent_id (str): Identifier of the agent to approve.
+        request (AgentReviewRequest): Expected configuration version.
+        user (User): Authenticated reviewer.
+
+    Returns:
+        dict: Approved agent ID, status, version, and reviewer ID.
+
+    Raises:
+        HTTPException: If permission is denied, the agent is
+            inaccessible, the version differs, or approval fails.
+    """
+    if not has_permission(user.role, "agents:review"):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to review agents.",
+        )
+
+    try:
+        record = registry.get_agent_record(agent_id)
+
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Agent not found.",
+            )
+
+        if record["owner_id"] == user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot approve your own agent.",
+            )
+
+        approved = registry.approve_agent(
+            agent_id=agent_id,
+            reviewer_id=user.id,
+            expected_version=request.expected_version,
+        )
+
+        if not approved:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Agent must be pending and "
+                    "the expected version must match."
+                ),
+            )
+
+        return {
+            "agent_id": agent_id,
+            "approval_status": "approved",
+            "version": request.expected_version,
+            "approved_by": user.id,
+        }
+
+    except sqlite3.Error as exc:
+        logger.exception(
+            "Failed to approve agent: %s",
+            agent_id,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to approve agent.",
+        ) from exc
+
+@app.post(
+    "/api/agents/{agent_id}/reject",
+    status_code=status.HTTP_200_OK,
+)
+def reject_agent_for_review(
+    agent_id: str,
+    request: AgentReviewRequest,
+    user: User = Depends(current_user),
+) -> dict:
+    """Reject a pending agent using an authorized reviewer.
+
+    Args:
+        agent_id (str): Identifier of the agent to reject.
+        request (AgentReviewRequest): Expected configuration version.
+        user (User): Authenticated reviewer.
+
+    Returns:
+        dict: Rejected agent ID, status, version, and reviewer ID.
+
+    Raises:
+        HTTPException: If permission is denied, the agent is
+            inaccessible, its version differs, or rejection fails.
+    """
+    if not has_permission(user.role, "agents:review"):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to review agents.",
+        )
+
+    try:
+        record = registry.get_agent_record(agent_id)
+
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Agent not found.",
+            )
+
+        if record["owner_id"] == user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot reject your own agent.",
+            )
+
+        rejected = registry.reject_agent(
+            agent_id=agent_id,
+            reviewer_id=user.id,
+            expected_version=request.expected_version,
+        )
+
+        if not rejected:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Agent must be pending and "
+                    "the expected version must match."
+                ),
+            )
+
+        return {
+            "agent_id": agent_id,
+            "approval_status": "rejected",
+             "version": request.expected_version,
+             "reviewed_by": user.id,
+    }
+
+    except sqlite3.Error as exc:
+        logger.exception(
+            "Failed to reject agent: %s",
+            agent_id,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to reject agent.",
+        ) from exc
