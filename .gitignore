@@ -1,16 +1,41 @@
+
+# Environment variables
 .env
 .env.*
 !.env.example
 
+# Python virtual environments
 .venv/
-__pycache__/
-.pytest_cache/
+venv/
 
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# SQLite databases
 *.db
 *.db-shm
 *.db-wal
 
+# Node.js dependencies
 node_modules/
+npm-debug.log*
 
-tests/__pycache__/
-tests/ 
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.log
+*.tmp
+*.bak
+
+# Local backups
+backups/

@@ -1,6 +1,7 @@
 
-"""Execute authorized MCP operations for custom AI agents."""
+"""Execute authorized and Admin-enabled MCP operations for custom AI agents."""
 
+import sqlite3
 from typing import Any
 
 from jsonschema import ValidationError, validate
@@ -9,6 +10,7 @@ from mcp.types import TextContent, TextResourceContents
 
 from models.agent_config import AgentConfig
 from services.mcp_discovery import MCPCapabilities
+from services.tool_registry import tool_registry
 from tool_schemas import (
     MCP_TOOL_PREFIX,
     PROMPT_FUNCTION,
@@ -18,6 +20,27 @@ from tool_schemas import (
 
 MAX_RESULT_CHARS = 40000
 MAX_ERROR_CHARS = 1000
+
+
+def require_enabled_operation(operation_name: str) -> None:
+    """Reject an MCP operation disabled by an administrator.
+
+    Args:
+        operation_name (str): Registered MCP operation name.
+
+    Returns:
+        None: The operation is enabled.
+
+    Raises:
+        ValueError: If the operation is disabled, deleted,
+            or not registered.
+        sqlite3.Error: If the Tool Registry cannot be queried.
+    """
+    if not tool_registry.is_enabled(operation_name):
+        raise ValueError(
+            "MCP operation is disabled or unavailable: "
+            f"{operation_name}"
+        )
 
 
 def validate_mcp_tool_access(
@@ -53,6 +76,74 @@ def validate_mcp_tool_access(
     ):
         raise ValueError(
             f"Agent is not allowed to execute: {tool_name}"
+        )
+
+
+def validate_mcp_resource_access(
+    agent: AgentConfig,
+    uri: str,
+    capabilities: MCPCapabilities,
+) -> None:
+    """Validate an agent's permission to read an MCP resource.
+
+    Args:
+        agent (AgentConfig): Selected agent configuration.
+        uri (str): Requested MCP resource URI.
+        capabilities (MCPCapabilities): Discovered capabilities.
+
+    Returns:
+        None: Resource exists and access is permitted.
+
+    Raises:
+        ValueError: If the resource is unknown or unauthorized.
+    """
+    available_uris = {
+        str(resource.uri)
+        for resource in capabilities.resources
+    }
+
+    if uri not in available_uris:
+        raise ValueError(
+            f"Unknown MCP resource: {uri}"
+        )
+
+    if uri not in agent.allowed_resources:
+        raise ValueError(
+            "Agent is not allowed to read this MCP resource."
+        )
+
+
+def validate_mcp_prompt_access(
+    agent: AgentConfig,
+    name: str,
+    capabilities: MCPCapabilities,
+) -> None:
+    """Validate an agent's permission to retrieve an MCP prompt.
+
+    Args:
+        agent (AgentConfig): Selected agent configuration.
+        name (str): Requested MCP prompt name.
+        capabilities (MCPCapabilities): Discovered capabilities.
+
+    Returns:
+        None: Prompt exists and access is permitted.
+
+    Raises:
+        ValueError: If the prompt is unknown or unauthorized.
+    """
+    available_names = {
+        prompt.name
+        for prompt in capabilities.prompts
+    }
+
+    if name not in available_names:
+        raise ValueError(
+            f"Unknown MCP prompt: {name}"
+        )
+
+    if name not in agent.allowed_prompts:
+        raise ValueError(
+            "Agent is not allowed to retrieve this MCP prompt."
         )
 
 
@@ -125,7 +216,7 @@ async def execute_mcp_operation(
     function_name: str,
     arguments: dict[str, Any],
 ) -> str:
-    """Execute an authorized MCP tool, resource, or prompt.
+    """Execute an authorized and Admin-enabled MCP operation.
 
     Args:
         client (Client): Connected MCP client.
@@ -138,23 +229,31 @@ async def execute_mcp_operation(
         str: Text returned by the MCP operation.
 
     Raises:
-        ValueError: If the operation or arguments are invalid.
+        ValueError: If the operation is disabled, unauthorized,
+            unknown, or has invalid arguments.
         RuntimeError: If the MCP server reports a tool failure.
+        sqlite3.Error: If the Tool Registry cannot be queried.
     """
     if not isinstance(arguments, dict):
         raise ValueError(
             "MCP arguments must be a JSON object."
         )
 
+    # ---------------------------------------------------------
     # 1. Execute a native MCP tool.
+    # ---------------------------------------------------------
     if function_name.startswith(MCP_TOOL_PREFIX):
         tool_name = function_name[len(MCP_TOOL_PREFIX):]
 
+        # First verify the agent's access permissions.
         validate_mcp_tool_access(
             agent=agent,
             tool_name=tool_name,
             capabilities=capabilities,
         )
+
+        # Then enforce the global Admin setting.
+        require_enabled_operation(tool_name)
 
         tool_info = next(
             tool
@@ -177,6 +276,9 @@ async def execute_mcp_operation(
                 f"{exc.message}"
             ) from exc
 
+        # Recheck immediately before execution.
+        require_enabled_operation(tool_name)
+
         result = await client.call_tool(
             tool_name,
             arguments,
@@ -198,8 +300,13 @@ async def execute_mcp_operation(
             result.content
         )
 
+    # ---------------------------------------------------------
     # 2. Read an MCP resource.
+    # ---------------------------------------------------------
     if function_name == RESOURCE_FUNCTION:
+        # Check Admin enablement.
+        require_enabled_operation(RESOURCE_FUNCTION)
+
         uri = arguments.get("uri")
 
         if (
@@ -210,15 +317,14 @@ async def execute_mcp_operation(
                 "Resource operation requires only a URI."
             )
 
-        available_uris = {
-            str(resource.uri)
-            for resource in capabilities.resources
-        }
+        validate_mcp_resource_access(
+            agent=agent,
+            uri=uri,
+            capabilities=capabilities,
+        )
 
-        if uri not in available_uris:
-            raise ValueError(
-                f"Unknown MCP resource: {uri}"
-            )
+        # Recheck immediately before execution.
+        require_enabled_operation(RESOURCE_FUNCTION)
 
         result = await client.read_resource(uri)
 
@@ -226,8 +332,13 @@ async def execute_mcp_operation(
             result.contents
         )
 
+    # ---------------------------------------------------------
     # 3. Retrieve an MCP prompt.
+    # ---------------------------------------------------------
     if function_name == PROMPT_FUNCTION:
+        # Check Admin enablement.
+        require_enabled_operation(PROMPT_FUNCTION)
+
         name = arguments.get("name")
 
         if not isinstance(name, str):
@@ -240,17 +351,38 @@ async def execute_mcp_operation(
             for prompt in capabilities.prompts
         }
 
-        if name not in available_prompts:
-            raise ValueError(
-                f"Unknown MCP prompt: {name}"
-            )
+        validate_mcp_prompt_access(
+            agent=agent,
+            name=name,
+            capabilities=capabilities,
+        )
 
         prompt = available_prompts[name]
 
-        # MCP discovery stores argument names as strings.
-        allowed_arguments = set(
-            prompt.arguments or []
-        )
+        # Extract supported and required MCP prompt arguments.
+        allowed_arguments: set[str] = set()
+        required_arguments: set[str] = set()
+
+        for argument in prompt.arguments or []:
+            if isinstance(argument, str):
+                argument_name = argument
+                is_required = False
+            else:
+                argument_name = argument.name
+                is_required = bool(
+                    getattr(argument, "required", False)
+                )
+
+            if argument_name == "name":
+                raise ValueError(
+                    "MCP prompt argument 'name' conflicts "
+                    "with the prompt selector."
+                )
+
+            allowed_arguments.add(argument_name)
+
+            if is_required:
+                required_arguments.add(argument_name)
 
         prompt_arguments = {
             key: value
@@ -259,12 +391,28 @@ async def execute_mcp_operation(
         }
 
         # Reject arguments not declared by the MCP prompt.
-        if set(prompt_arguments) - allowed_arguments:
+        unknown_arguments = (
+            set(prompt_arguments) - allowed_arguments
+        )
+
+        if unknown_arguments:
             raise ValueError(
-                "Unsupported MCP prompt arguments."
+                "Unsupported MCP prompt arguments: "
+                + ", ".join(sorted(unknown_arguments))
             )
 
-        # MCP prompt arguments must contain string values.
+        # Reject missing required prompt arguments.
+        missing_arguments = (
+            required_arguments - set(prompt_arguments)
+        )
+
+        if missing_arguments:
+            raise ValueError(
+                "Missing required MCP prompt arguments: "
+                + ", ".join(sorted(missing_arguments))
+            )
+
+        # All supplied prompt argument values must be strings.
         if any(
             not isinstance(value, str)
             for value in prompt_arguments.values()
@@ -272,6 +420,9 @@ async def execute_mcp_operation(
             raise ValueError(
                 "MCP prompt arguments must be strings."
             )
+
+        # Recheck immediately before execution.
+        require_enabled_operation(PROMPT_FUNCTION)
 
         result = await client.get_prompt(
             name,

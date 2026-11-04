@@ -1,4 +1,6 @@
 
+"""Define agent configuration and MCP capability permissions."""
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -8,8 +10,8 @@ class CacheConfig(BaseModel):
     """Define caching behavior for an agent.
 
     Attributes:
-        enabled (bool): Whether tool-result caching is enabled.
-        ttl_seconds (int): Duration for which cached results remain valid.
+        enabled (bool): Whether result caching is enabled.
+        ttl_seconds (int): Cache lifetime in seconds.
 
     Functions:
         None.
@@ -28,12 +30,14 @@ class AgentConfig(BaseModel):
         description (str): Purpose of the agent.
         system_prompt (str): Custom instructions for the agent.
         tool_access (str): Whether all or selected tools are available.
-        allowed_tools (list[str]): Tools permitted in selected mode.
-        cache (CacheConfig): Tool-result caching configuration.
+        allowed_tools (list[str]): Permitted native MCP tool names.
+        allowed_resources (list[str]): Permitted MCP resource URIs.
+        allowed_prompts (list[str]): Permitted MCP prompt names.
+        cache (CacheConfig): Result caching configuration.
         metadata (dict[str, Any]): Optional agent metadata.
 
     Functions:
-        validate_tool_access: Validate selected tool configuration.
+        validate_tool_access: Validate the tool access configuration.
     """
 
     id: str = Field(min_length=1)
@@ -42,7 +46,11 @@ class AgentConfig(BaseModel):
     system_prompt: str = Field(min_length=1)
 
     tool_access: Literal["all", "selected"] = "all"
+
     allowed_tools: list[str] = Field(default_factory=list)
+
+    allowed_resources: list[str] = Field(default_factory=list)
+    allowed_prompts: list[str] = Field(default_factory=list)
 
     cache: CacheConfig = Field(default_factory=CacheConfig)
     metadata: dict[str, Any] = Field(default_factory=dict)
