@@ -15,4 +15,4 @@ COPY . .
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["sh", "-c", "python -m scripts.bootstrap_admin && exec uvicorn api:app --host 0.0.0.0 --port ${PORT:-10000}"]
