@@ -1,7 +1,6 @@
 
 """Execute authorized and Admin-enabled MCP operations for custom AI agents."""
 
-import sqlite3
 from typing import Any
 
 from jsonschema import ValidationError, validate
@@ -34,7 +33,7 @@ def require_enabled_operation(operation_name: str) -> None:
     Raises:
         ValueError: If the operation is disabled, deleted,
             or not registered.
-        sqlite3.Error: If the Tool Registry cannot be queried.
+        SQLAlchemyError: If the Tool Registry cannot be queried.
     """
     if not tool_registry.is_enabled(operation_name):
         raise ValueError(
@@ -232,7 +231,7 @@ async def execute_mcp_operation(
         ValueError: If the operation is disabled, unauthorized,
             unknown, or has invalid arguments.
         RuntimeError: If the MCP server reports a tool failure.
-        sqlite3.Error: If the Tool Registry cannot be queried.
+        SQLAlchemyError: If the Tool Registry cannot be queried.
     """
     if not isinstance(arguments, dict):
         raise ValueError(

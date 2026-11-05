@@ -1,11 +1,17 @@
 
-"""Persist administrator-managed MCP tool configurations."""
+"""Persist administrator-managed MCP tool configurations in PostgreSQL."""
 
 import os
-import sqlite3
 from pathlib import Path
 
-from models.tool_config import ToolRecord, ToolKind
+from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+
+from database.connection import SessionLocal
+from database.models import ManagedToolModel
+from models.tool_config import ToolKind, ToolRecord
 
 
 # Only backend-approved handlers may be registered.
@@ -23,173 +29,139 @@ BUILT_IN_HANDLERS = {
     "get_mcp_prompt",
 }
 
+DEFAULT_DB_PATH = Path("data/agents.db")
+
+DEFAULT_TOOLS = [
+    {
+        "name": "get_project_overview",
+        "description": "Read the project overview.",
+        "handler": "get_project_overview",
+        "kind": "read",
+        "enabled": True,
+        "built_in": True,
+        "deleted": False,
+    },
+    {
+        "name": "read_mcp_resource",
+        "description": "Read an authorized MCP resource.",
+        "handler": "read_mcp_resource",
+        "kind": "read",
+        "enabled": True,
+        "built_in": True,
+        "deleted": False,
+    },
+    {
+        "name": "get_mcp_prompt",
+        "description": "Retrieve an authorized MCP prompt.",
+        "handler": "get_mcp_prompt",
+        "kind": "read",
+        "enabled": True,
+        "built_in": True,
+        "deleted": False,
+    },
+    {
+        "name": "read_project_note",
+        "description": "Read a stored project note.",
+        "handler": "read_project_note",
+        "kind": "read",
+        "enabled": True,
+        "built_in": True,
+        "deleted": False,
+    },
+    {
+        "name": "write_project_note",
+        "description": "Create or update a project note.",
+        "handler": "write_project_note",
+        "kind": "write",
+        "enabled": True,
+        "built_in": True,
+        "deleted": False,
+    },
+]
+
 
 class ToolRegistry:
-    """Manage persistent MCP tool configurations.
+    """Manage persistent MCP tool configurations in PostgreSQL.
 
     Attributes:
-        db_path (Path): SQLite database location.
+        db_path (Path): Legacy SQLite path retained for compatibility.
+        session_factory (sessionmaker): PostgreSQL session factory.
 
     Functions:
-        _initialize: Create and seed the tool registry.
-        list_tools: Return registered tools.
-        get_tool: Retrieve a tool by name.
-        create_tool: Register an approved handler.
-        update_tool: Update editable fields.
+        initialize_defaults: Seed missing default tools explicitly.
+        _to_record: Convert a database model into a ToolRecord.
+        list_tools: Return registered, non-deleted tools.
+        get_tool: Retrieve a non-deleted tool by name.
+        create_tool: Register an approved custom handler.
+        is_enabled: Check whether a tool is enabled.
+        update_tool: Update editable tool fields.
         set_enabled: Change tool availability.
         delete_tool: Soft-delete a custom tool.
     """
 
-    def __init__(self, db_path: str | Path) -> None:
-        """Initialize the persistent registry.
+    def __init__(
+        self,
+        db_path: str | Path = DEFAULT_DB_PATH,
+        session_factory: sessionmaker = SessionLocal,
+    ) -> None:
+        """Initialize the PostgreSQL tool registry without database writes.
 
         Args:
-            db_path (str | Path): SQLite database path.
+            db_path (str | Path): Legacy SQLite path, no longer used.
+            session_factory (sessionmaker): SQLAlchemy session factory.
 
         Returns:
-            None: Initializes registry storage.
+            None: Initializes the registry instance.
 
         Raises:
-            sqlite3.Error: If initialization fails.
-            OSError: If the parent directory cannot be created.
+            TypeError: If an invalid database path is supplied.
         """
         self.db_path = Path(db_path)
-        self._initialize()
+        self.session_factory = session_factory
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open a SQLite connection with dictionary-like rows.
-
-        Args:
-            None.
-
-        Returns:
-            sqlite3.Connection: Configured database connection.
-
-        Raises:
-            sqlite3.Error: If the connection fails.
-        """
-        connection = sqlite3.connect(
-            self.db_path,
-            timeout=10,
-        )
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def _initialize(self) -> None:
-        """Create the registry and seed system tools.
+    def initialize_defaults(self) -> None:
+        """Insert missing default tools without modifying existing records.
 
         Args:
             None.
 
         Returns:
-            None: Registry schema and defaults are initialized.
+            None: Missing default tools are inserted.
 
         Raises:
-            sqlite3.Error: If database initialization fails.
+            SQLAlchemyError: If database initialization fails.
         """
-        self.db_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS managed_tools (
-                    name TEXT PRIMARY KEY,
-                    description TEXT NOT NULL,
-                    handler TEXT NOT NULL,
-                    kind TEXT NOT NULL
-                        CHECK(kind IN ('read', 'write')),
-                    enabled INTEGER NOT NULL DEFAULT 1
-                        CHECK(enabled IN (0, 1)),
-                    built_in INTEGER NOT NULL DEFAULT 0
-                        CHECK(built_in IN (0, 1)),
-                    deleted INTEGER NOT NULL DEFAULT 0
-                        CHECK(deleted IN (0, 1))
+        with self.session_factory.begin() as session:
+            statement = (
+                insert(ManagedToolModel)
+                .values(DEFAULT_TOOLS)
+                .on_conflict_do_nothing(
+                    index_elements=[ManagedToolModel.name]
                 )
-                """
             )
-
-            defaults = [
-                (
-                    "get_project_overview",
-                    "Read the project overview.",
-                    "get_project_overview",
-                    "read",
-                    1,
-                    1,
-                ),
-                (
-                    "read_mcp_resource",
-                    "Read an authorized MCP resource.",
-                    "read_mcp_resource",
-                    "read",
-                    1,
-                    1,
-                ),
-                (
-                    "get_mcp_prompt",
-                    "Retrieve an authorized MCP prompt.",
-                    "get_mcp_prompt",
-                    "read",
-                    1,
-                    1,
-                ),
-                (
-                    "read_project_note",
-                    "Read a stored project note.",
-                    "read_project_note",
-                    "read",
-                    1,
-                    1,
-                ),
-                (
-                    "write_project_note",
-                    "Create or update a project note.",
-                    "write_project_note",
-                    "write",
-                    1,
-                    1,
-                ),
-            ]
-
-            connection.executemany(
-                """
-                INSERT OR IGNORE INTO managed_tools (
-                    name,
-                    description,
-                    handler,
-                    kind,
-                    enabled,
-                    built_in
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                defaults,
-            )
+            session.execute(statement)
 
     @staticmethod
-    def _to_record(row: sqlite3.Row) -> ToolRecord:
-        """Convert a database row into a tool model.
+    def _to_record(model: ManagedToolModel) -> ToolRecord:
+        """Convert a stored PostgreSQL model into a validated tool record.
 
         Args:
-            row (sqlite3.Row): Stored tool row.
+            model (ManagedToolModel): Stored tool configuration.
 
         Returns:
-            ToolRecord: Validated tool configuration.
+            ToolRecord: Validated MCP tool configuration.
 
         Raises:
             ValueError: If stored data is invalid.
         """
         return ToolRecord(
-            name=row["name"],
-            description=row["description"],
-            handler=row["handler"],
-            kind=row["kind"],
-            enabled=bool(row["enabled"]),
-            built_in=bool(row["built_in"]),
-            deleted=bool(row["deleted"]),
+            name=model.name,
+            description=model.description,
+            handler=model.handler,
+            kind=model.kind,
+            enabled=model.enabled,
+            built_in=model.built_in,
+            deleted=model.deleted,
         )
 
     def list_tools(self) -> list[ToolRecord]:
@@ -199,44 +171,44 @@ class ToolRegistry:
             None.
 
         Returns:
-            list[ToolRecord]: Registered tools.
+            list[ToolRecord]: Registered tools ordered by name.
 
         Raises:
-            sqlite3.Error: If retrieval fails.
+            SQLAlchemyError: If database retrieval fails.
         """
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM managed_tools
-                WHERE deleted = 0
-                ORDER BY name
-                """
-            ).fetchall()
+        with self.session_factory() as session:
+            models = session.scalars(
+                select(ManagedToolModel)
+                .where(ManagedToolModel.deleted.is_(False))
+                .order_by(ManagedToolModel.name.asc())
+            ).all()
 
-        return [self._to_record(row) for row in rows]
+            return [
+                self._to_record(model)
+                for model in models
+            ]
 
     def get_tool(self, name: str) -> ToolRecord | None:
-        """Retrieve an active registry record by name.
+        """Retrieve a non-deleted tool by name.
 
         Args:
-            name (str): Tool name.
+            name (str): Registered tool name.
 
         Returns:
-            ToolRecord | None: Tool or None if unavailable.
+            ToolRecord | None: Tool record or None if unavailable.
 
         Raises:
-            sqlite3.Error: If retrieval fails.
+            SQLAlchemyError: If database retrieval fails.
         """
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM managed_tools
-                WHERE name = ? AND deleted = 0
-                """,
-                (name,),
-            ).fetchone()
+        with self.session_factory() as session:
+            model = session.scalar(
+                select(ManagedToolModel).where(
+                    ManagedToolModel.name == name,
+                    ManagedToolModel.deleted.is_(False),
+                )
+            )
 
-        return self._to_record(row) if row else None
+            return self._to_record(model) if model else None
 
     def create_tool(
         self,
@@ -245,7 +217,7 @@ class ToolRegistry:
         handler: str,
         kind: ToolKind,
     ) -> ToolRecord:
-        """Create a configuration for an approved handler.
+        """Create a disabled custom tool using an approved handler.
 
         Args:
             name (str): New tool name.
@@ -257,8 +229,9 @@ class ToolRegistry:
             ToolRecord: Newly registered disabled tool.
 
         Raises:
-            ValueError: If the handler is unsupported or duplicated.
-            sqlite3.Error: If persistence fails.
+            ValueError: If the handler is unsupported, reserved,
+                incorrectly classified, or already registered.
+            SQLAlchemyError: If database persistence fails.
         """
         if handler not in APPROVED_HANDLERS:
             raise ValueError(
@@ -280,34 +253,43 @@ class ToolRegistry:
                 "This name is reserved for a built-in operation."
             )
 
-        with self._connect() as connection:
-            existing = connection.execute(
-                """
-                SELECT name FROM managed_tools
-                WHERE name = ? OR handler = ?
-                """,
-                (name, handler),
-            ).fetchone()
-
-            if existing:
-                raise ValueError(
-                    "Tool name or handler is already registered."
+        try:
+            with self.session_factory.begin() as session:
+                existing = session.scalar(
+                    select(ManagedToolModel.name)
+                    .where(
+                        or_(
+                            ManagedToolModel.name == name,
+                            ManagedToolModel.handler == handler,
+                        )
+                    )
+                    .limit(1)
                 )
 
-            connection.execute(
-                """
-                INSERT INTO managed_tools (
-                    name, description, handler, kind,
-                    enabled, built_in, deleted
+                if existing is not None:
+                    raise ValueError(
+                        "Tool name or handler is already registered."
+                    )
+
+                session.add(
+                    ManagedToolModel(
+                        name=name,
+                        description=description,
+                        handler=handler,
+                        kind=kind,
+                        enabled=False,
+                        built_in=False,
+                        deleted=False,
+                    )
                 )
-                VALUES (?, ?, ?, ?, 0, 0, 0)
-                """,
-                (name, description, handler, kind),
-            )
+
+        except IntegrityError as exc:
+            raise ValueError(
+                "Tool name or handler is already registered."
+            ) from exc
 
         return self.get_tool(name)
 
-    
     def is_enabled(self, name: str) -> bool:
         """Check whether an MCP operation is currently enabled.
 
@@ -315,25 +297,20 @@ class ToolRegistry:
             name (str): Registered operation name.
 
         Returns:
-            bool: True if the operation exists, is enabled,
-                and has not been deleted.
+            bool: True if the tool exists, is enabled, and is not deleted.
 
         Raises:
-            sqlite3.Error: If the database query fails.
+            SQLAlchemyError: If database retrieval fails.
         """
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT enabled
-                FROM managed_tools
-                WHERE name = ?
-                  AND deleted = 0
-                """,
-                (name,),
-            ).fetchone()
+        with self.session_factory() as session:
+            enabled = session.scalar(
+                select(ManagedToolModel.enabled).where(
+                    ManagedToolModel.name == name,
+                    ManagedToolModel.deleted.is_(False),
+                )
+            )
 
-        return row is not None and bool(row["enabled"])
-
+            return enabled is True
 
     def update_tool(
         self,
@@ -345,30 +322,40 @@ class ToolRegistry:
 
         Args:
             name (str): Existing tool name.
-            description (str | None): Optional description.
+            description (str | None): Optional new description.
             enabled (bool | None): Optional enabled status.
 
         Returns:
-            ToolRecord | None: Updated tool or None.
+            ToolRecord | None: Updated tool or None if unavailable.
 
         Raises:
-            sqlite3.Error: If persistence fails.
+            SQLAlchemyError: If database persistence fails.
         """
-        with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE managed_tools
-                SET
-                    description = COALESCE(?, description),
-                    enabled = COALESCE(?, enabled)
-                WHERE name = ? AND deleted = 0
-                """,
-                (
-                    description,
-                    int(enabled) if enabled is not None else None,
-                    name,
-                ),
+        values = {}
+
+        if description is not None:
+            values["description"] = description
+
+        if enabled is not None:
+            values["enabled"] = enabled
+
+        if not values:
+            return self.get_tool(name)
+
+        with self.session_factory.begin() as session:
+            result = session.execute(
+                update(ManagedToolModel)
+                .where(
+                    ManagedToolModel.name == name,
+                    ManagedToolModel.deleted.is_(False),
+                )
+                .values(**values)
             )
+
+            changed = result.rowcount == 1
+
+        if not changed:
+            return None
 
         return self.get_tool(name)
 
@@ -384,10 +371,10 @@ class ToolRegistry:
             enabled (bool): Desired availability.
 
         Returns:
-            ToolRecord | None: Updated tool or None.
+            ToolRecord | None: Updated tool or None if unavailable.
 
         Raises:
-            sqlite3.Error: If persistence fails.
+            SQLAlchemyError: If database persistence fails.
         """
         return self.update_tool(
             name=name,
@@ -401,37 +388,36 @@ class ToolRegistry:
             name (str): Tool to delete.
 
         Returns:
-            bool: True if a custom tool was deleted.
+            bool: True if a custom tool was deleted, otherwise False.
 
         Raises:
             ValueError: If the tool is built-in.
-            sqlite3.Error: If persistence fails.
+            SQLAlchemyError: If database persistence fails.
         """
-        tool = self.get_tool(name)
-
-        if tool is None:
-            return False
-
-        if tool.built_in:
-            raise ValueError(
-                "Built-in tools cannot be deleted. Disable them instead."
+        with self.session_factory.begin() as session:
+            model = session.scalar(
+                select(ManagedToolModel)
+                .where(
+                    ManagedToolModel.name == name,
+                    ManagedToolModel.deleted.is_(False),
+                )
+                .with_for_update()
             )
 
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE managed_tools
-                SET deleted = 1, enabled = 0
-                WHERE name = ?
-                    AND built_in = 0
-                    AND deleted = 0
-                """,
-                (name,),
-            )
+            if model is None:
+                return False
 
-        return cursor.rowcount > 0
+            if model.built_in:
+                raise ValueError(
+                    "Built-in tools cannot be deleted. "
+                    "Disable them instead."
+                )
+
+            model.deleted = True
+            model.enabled = False
+
+        return True
 
 
-tool_registry = ToolRegistry(
-    db_path=os.getenv("DATABASE_PATH", "data/agents.db")
-)
+# Creating the registry does not access or modify PostgreSQL.
+tool_registry = ToolRegistry()

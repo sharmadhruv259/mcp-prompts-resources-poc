@@ -141,7 +141,7 @@ def filter_enabled_capabilities(
         MCPCapabilities: Capabilities permitted by Admin settings.
 
     Raises:
-        sqlite3.Error: If registry access fails.
+        SQLAlchemyError: If registry access fails.
     """
     enabled_tools = [
         tool

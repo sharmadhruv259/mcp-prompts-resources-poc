@@ -35,7 +35,7 @@ def build_agent_tool_schemas(
         ValueError: If the agent references unknown MCP tools,
             resources, or prompts, or if an MCP prompt argument
             conflicts with the prompt selector.
-        sqlite3.Error: If the Tool Registry cannot be queried.
+        SQLAlchemyError: If the Tool Registry cannot be queried.
     """
     # ---------------------------------------------------------
     # 1. Validate against raw MCP discovery.

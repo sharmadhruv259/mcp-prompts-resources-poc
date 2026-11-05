@@ -1,10 +1,14 @@
 
-"""Provision the predefined MCP Playground administrator."""
+"""Provision the predefined MCP Playground administrator in PostgreSQL."""
 
 import os
-import sqlite3
+
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from auth.permissions import Role
+from database.connection import SessionLocal
+from database.models import UserModel
 from services.user_service import UserService
 
 
@@ -15,38 +19,33 @@ def bootstrap_admin() -> None:
         None.
 
     Returns:
-        None: Prints the provisioning result.
+        None: Prints the administrator provisioning result.
 
     Raises:
         ValueError: If administrator credentials are invalid.
-        sqlite3.Error: If database operations fail.
+        SQLAlchemyError: If PostgreSQL operations fail.
     """
     username = os.getenv("ADMIN_USERNAME", "").strip()
     password = os.getenv("ADMIN_PASSWORD", "")
-    database_path = os.getenv("DATABASE_PATH", "data/agents.db")
 
-    if not username or len(password) < 12:
+    if not username or not 12 <= len(password) <= 1024:
         raise ValueError(
             "Set ADMIN_USERNAME and an ADMIN_PASSWORD "
-            "containing at least 12 characters."
+            "containing 12 to 1024 characters."
         )
 
-    service = UserService(database_path)
-
-    with service._connect() as connection:
-        existing_admin = connection.execute(
-            """
-            SELECT id
-            FROM users
-            WHERE role = ?
-            LIMIT 1
-            """,
-            (Role.ADMIN.value,),
-        ).fetchone()
+    with SessionLocal() as session:
+        existing_admin = session.scalar(
+            select(UserModel).where(
+                UserModel.role == Role.ADMIN.value
+            ).limit(1)
+        )
 
     if existing_admin is not None:
         print("Admin already exists. No changes made.")
         return
+
+    service = UserService()
 
     admin = service.create_user(
         username=username,

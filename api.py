@@ -3,7 +3,7 @@
 
 import os
 import logging
-import sqlite3
+from sqlalchemy.exc import SQLAlchemyError
 from typing import Literal
 from fastapi import Depends
 
@@ -43,9 +43,7 @@ from auth.tool_management_routes import (
 
 logger = logging.getLogger(__name__)
 
-registry = AgentRegistry(
-    db_path=os.getenv("DATABASE_PATH", "data/agents.db")
-)
+registry = AgentRegistry()
 
 app = FastAPI(
     title="MCP Playground API",
@@ -314,7 +312,7 @@ def create_agent(
             detail=str(exc),
         ) from exc
 
-    except sqlite3.Error as exc:
+    except SQLAlchemyError as exc:
         logger.exception(
             "Failed to create agent: %s",
             agent.id,
@@ -342,7 +340,7 @@ def list_agents(
         list[AgentConfig]: Agent configurations visible to the user.
 
     Raises:
-        sqlite3.Error: If database retrieval fails.
+        SQLAlchemyError: If database retrieval fails.
     """
     if user.role == Role.ADMIN:
         return registry.list_agents()
@@ -486,7 +484,7 @@ def update_agent(
 
         return updated_agent
 
-    except sqlite3.Error as exc:
+    except SQLAlchemyError as exc:
         logger.exception(
             "Failed to update agent: %s",
             agent_id,
@@ -533,7 +531,7 @@ def delete_agent(
 
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    except sqlite3.Error as exc:
+    except SQLAlchemyError as exc:
         logger.exception("Failed to delete agent: %s", agent_id)
         raise HTTPException(
             status_code=500,
@@ -647,7 +645,7 @@ async def chat(
             request.agent_id
         )
 
-    except sqlite3.Error as exc:
+    except SQLAlchemyError as exc:
         logger.exception(
             "Failed to load agent: %s",
             request.agent_id,
@@ -693,7 +691,7 @@ async def chat(
         Raises:
             AgentAuthorizationError: If the agent was deleted, its
                 approval or owner changed, or its version changed.
-            sqlite3.Error: If the registry cannot be read.
+            SQLAlchemyError: If the registry cannot be read.
         """
         current_record = registry.get_agent_record(selected_agent_id)
 
@@ -849,7 +847,7 @@ def submit_agent_for_review(
             "version": request.expected_version,
         }
 
-    except sqlite3.Error as exc:
+    except SQLAlchemyError as exc:
         logger.exception(
             "Failed to submit agent: %s",
             agent_id,
@@ -926,7 +924,7 @@ def approve_agent_for_review(
             "approved_by": user.id,
         }
 
-    except sqlite3.Error as exc:
+    except SQLAlchemyError as exc:
         logger.exception(
             "Failed to approve agent: %s",
             agent_id,
@@ -1003,7 +1001,7 @@ def reject_agent_for_review(
              "reviewed_by": user.id,
     }
 
-    except sqlite3.Error as exc:
+    except SQLAlchemyError as exc:
         logger.exception(
             "Failed to reject agent: %s",
             agent_id,

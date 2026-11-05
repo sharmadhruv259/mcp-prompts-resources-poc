@@ -1,6 +1,6 @@
 
 """Define authentication endpoints for the MCP Playground."""
-import sqlite3
+from sqlalchemy.exc import SQLAlchemyError
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -11,11 +11,6 @@ from auth.dependencies import (
 from auth.tokens import (
     TOKEN_LIFETIME_SECONDS,
     create_access_token,
-)
-from models.user import (
-    LoginRequest,
-    TokenResponse,
-    User,
 )
 from services.user_service import UserService
 
@@ -104,7 +99,7 @@ def signup(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
-    except sqlite3.Error as exc:
+    except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unable to register user.",

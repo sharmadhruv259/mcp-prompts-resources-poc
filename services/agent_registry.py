@@ -1,10 +1,16 @@
 
-"""Persist custom AI agents with ownership and approval metadata."""
+"""Persist custom AI agents with PostgreSQL ownership and approval metadata."""
 
-import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+
+from database.connection import SessionLocal
+from database.models import AgentModel
 from models.agent_config import AgentConfig
 from services.mcp_cache import mcp_cache
 
@@ -20,14 +26,14 @@ AgentStatus = Literal[
 
 
 class AgentRegistry:
-    """Manage agent configurations and approval metadata.
+    """Manage agent configurations and approval metadata in PostgreSQL.
 
     Attributes:
-        db_path (Path): SQLite database file location.
+        db_path (Path): Legacy path retained for caller compatibility.
+        session_factory (sessionmaker): PostgreSQL session factory.
 
     Functions:
-        _connect: Open a SQLite connection.
-        _initialize: Create and migrate the agents table.
+        _to_record: Convert a database model to an agent record.
         create_agent: Save a new agent as a draft.
         get_agent: Retrieve an agent configuration.
         get_agent_record: Retrieve configuration and access metadata.
@@ -43,130 +49,54 @@ class AgentRegistry:
     def __init__(
         self,
         db_path: str | Path = DEFAULT_DB_PATH,
+        session_factory: sessionmaker = SessionLocal,
     ) -> None:
-        """Initialize the agent registry.
+        """Initialize the PostgreSQL agent registry.
 
         Args:
-            db_path (str | Path): SQLite database path.
+            db_path (str | Path): Legacy SQLite path, no longer used
+                for persistence.
+            session_factory (sessionmaker): SQLAlchemy session factory.
 
         Returns:
             None: Initializes the registry.
 
         Raises:
-            OSError: If the database directory cannot be created.
-            sqlite3.Error: If database initialization fails.
+            None: No database connection is opened during initialization.
         """
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        self._initialize()
+        self.session_factory = session_factory
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open a configured SQLite connection.
+    @staticmethod
+    def _to_record(model: AgentModel) -> dict:
+        """Convert a stored agent into its public record representation.
 
         Args:
-            None.
+            model (AgentModel): Stored PostgreSQL agent.
 
         Returns:
-            sqlite3.Connection: Connection with named rows.
+            dict: Agent configuration and approval metadata.
 
         Raises:
-            sqlite3.Error: If the connection fails.
+            ValueError: If the stored configuration is invalid.
         """
-        connection = sqlite3.connect(
-            self.db_path,
-            timeout=10,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
-
-    def _initialize(self) -> None:
-        """Create or migrate agent storage without deleting records.
-
-        Args:
-            None.
-
-        Returns:
-            None: Initializes the database schema.
-
-        Raises:
-            sqlite3.Error: If schema migration fails.
-        """
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agents (
-                    id TEXT PRIMARY KEY,
-                    configuration TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                        DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL
-                        DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-
-            columns = {
-                row["name"]
-                for row in connection.execute(
-                    "PRAGMA table_info(agents)"
-                ).fetchall()
-            }
-
-            if "owner_id" not in columns:
-                connection.execute(
-                    """
-                    ALTER TABLE agents
-                    ADD COLUMN owner_id TEXT
-                    """
-                )
-
-            if "approval_status" not in columns:
-                connection.execute(
-                    """
-                    ALTER TABLE agents
-                    ADD COLUMN approval_status TEXT NOT NULL
-                    DEFAULT 'draft'
-                    CHECK (
-                        approval_status IN (
-                            'draft',
-                            'pending',
-                            'approved',
-                            'rejected'
-                        )
-                    )
-                    """
-                )
-
-            if "approved_by" not in columns:
-                connection.execute(
-                    """
-                    ALTER TABLE agents
-                    ADD COLUMN approved_by TEXT
-                    """
-                )
-
-            if "approved_at" not in columns:
-                connection.execute(
-                    """
-                    ALTER TABLE agents
-                    ADD COLUMN approved_at TEXT
-                    """
-                )
-
-            if "version" not in columns:
-                connection.execute(
-                    """
-                    ALTER TABLE agents
-                    ADD COLUMN version INTEGER NOT NULL DEFAULT 1
-                    """
-                )
-
-            # Legacy agents remain unapproved.
-            # Historical records are never automatically approved.
+        return {
+            "id": model.id,
+            "configuration": AgentConfig.model_validate_json(
+                model.configuration
+            ),
+            "owner_id": model.owner_id,
+            "approval_status": model.approval_status,
+            "approved_by": model.approved_by,
+            "approved_at": (
+                str(model.approved_at)
+                if model.approved_at is not None
+                else None
+            ),
+            "version": model.version,
+            "created_at": str(model.created_at),
+            "updated_at": str(model.updated_at),
+        }
 
     def create_agent(
         self,
@@ -183,31 +113,25 @@ class AgentRegistry:
             AgentConfig: Saved agent configuration.
 
         Raises:
-            ValueError: If the agent already exists.
-            sqlite3.Error: If persistence fails.
+            ValueError: If the agent already exists or an owner
+                reference is invalid.
+            SQLAlchemyError: If database persistence fails.
         """
         try:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO agents (
-                        id,
-                        configuration,
-                        owner_id,
-                        approval_status
+            with self.session_factory.begin() as session:
+                session.add(
+                    AgentModel(
+                        id=agent.id,
+                        configuration=agent.model_dump_json(),
+                        owner_id=owner_id,
+                        approval_status="draft",
+                        version=1,
                     )
-                    VALUES (?, ?, ?, 'draft')
-                    """,
-                    (
-                        agent.id,
-                        agent.model_dump_json(),
-                        owner_id,
-                    ),
                 )
-
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise ValueError(
-                f"Agent already exists: {agent.id}"
+                f"Could not create agent {agent.id}: "
+                "duplicate ID or invalid owner."
             ) from exc
 
         mcp_cache.invalidate_agent(agent.id)
@@ -226,24 +150,18 @@ class AgentRegistry:
             AgentConfig | None: Saved agent or None.
 
         Raises:
-            sqlite3.Error: If retrieval fails.
+            ValueError: If the stored configuration is invalid.
+            SQLAlchemyError: If retrieval fails.
         """
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT configuration
-                FROM agents
-                WHERE id = ?
-                """,
-                (agent_id,),
-            ).fetchone()
+        with self.session_factory() as session:
+            model = session.get(AgentModel, agent_id)
 
-        if row is None:
-            return None
+            if model is None:
+                return None
 
-        return AgentConfig.model_validate_json(
-            row["configuration"]
-        )
+            return AgentConfig.model_validate_json(
+                model.configuration
+            )
 
     def get_agent_record(
         self,
@@ -258,39 +176,16 @@ class AgentRegistry:
             dict | None: Agent record or None if absent.
 
         Raises:
-            sqlite3.Error: If retrieval fails.
+            ValueError: If the stored configuration is invalid.
+            SQLAlchemyError: If retrieval fails.
         """
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    id,
-                    configuration,
-                    owner_id,
-                    approval_status,
-                    approved_by,
-                    approved_at,
-                    version,
-                    created_at,
-                    updated_at
-                FROM agents
-                WHERE id = ?
-                """,
-                (agent_id,),
-            ).fetchone()
+        with self.session_factory() as session:
+            model = session.get(AgentModel, agent_id)
 
-        if row is None:
-            return None
+            if model is None:
+                return None
 
-        record = dict(row)
-
-        record["configuration"] = (
-            AgentConfig.model_validate_json(
-                row["configuration"]
-            )
-        )
-
-        return record
+            return self._to_record(model)
 
     def list_agents(self) -> list[AgentConfig]:
         """Retrieve all saved agent configurations.
@@ -302,23 +197,18 @@ class AgentRegistry:
             list[AgentConfig]: Agents ordered by ID.
 
         Raises:
-            sqlite3.Error: If retrieval fails.
+            ValueError: If a stored configuration is invalid.
+            SQLAlchemyError: If retrieval fails.
         """
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT configuration
-                FROM agents
-                ORDER BY id ASC
-                """
-            ).fetchall()
+        with self.session_factory() as session:
+            models = session.scalars(
+                select(AgentModel).order_by(AgentModel.id.asc())
+            ).all()
 
-        return [
-            AgentConfig.model_validate_json(
-                row["configuration"]
-            )
-            for row in rows
-        ]
+            return [
+                AgentConfig.model_validate_json(model.configuration)
+                for model in models
+            ]
 
     def list_agent_records(
         self,
@@ -333,37 +223,25 @@ class AgentRegistry:
             list[dict]: Agent records ordered by ID.
 
         Raises:
-            sqlite3.Error: If retrieval fails.
+            ValueError: If a stored configuration is invalid.
+            SQLAlchemyError: If retrieval fails.
         """
-        with self._connect() as connection:
-            if owner_id is None:
-                rows = connection.execute(
-                    """
-                    SELECT id
-                    FROM agents
-                    ORDER BY id ASC
-                    """
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT id
-                    FROM agents
-                    WHERE owner_id = ?
-                    ORDER BY id ASC
-                    """,
-                    (owner_id,),
-                ).fetchall()
+        statement = select(AgentModel)
 
-        return [
-            record
-            for row in rows
-            if (
-                record := self.get_agent_record(
-                    row["id"]
-                )
-            ) is not None
-        ]
+        if owner_id is not None:
+            statement = statement.where(
+                AgentModel.owner_id == owner_id
+            )
+
+        statement = statement.order_by(AgentModel.id.asc())
+
+        with self.session_factory() as session:
+            models = session.scalars(statement).all()
+
+            return [
+                self._to_record(model)
+                for model in models
+            ]
 
     def update_agent(
         self,
@@ -372,7 +250,7 @@ class AgentRegistry:
         owner_id: str,
         expected_version: int,
     ) -> AgentConfig | None:
-        """Update an owned agent and invalidate previous approval.
+        """Update an owned agent and invalidate its previous approval.
 
         Args:
             agent_id (str): Existing agent identifier.
@@ -381,48 +259,42 @@ class AgentRegistry:
             expected_version (int): Expected current version.
 
         Returns:
-            AgentConfig | None: Updated agent if successful,
-                otherwise None.
+            AgentConfig | None: Updated agent or None if no row matched.
 
         Raises:
             ValueError: If the agent ID or version is invalid.
-            sqlite3.Error: If persistence fails.
+            SQLAlchemyError: If persistence fails.
         """
         if agent.id != agent_id:
-            raise ValueError(
-                "Agent ID cannot be changed."
-            )
+            raise ValueError("Agent ID cannot be changed.")
 
         if expected_version < 1:
             raise ValueError(
                 "Expected version must be at least 1."
             )
 
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE agents
-                SET
-                    configuration = ?,
-                    approval_status = 'draft',
-                    approved_by = NULL,
-                    approved_at = NULL,
-                    version = version + 1,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND owner_id = ?
-                  AND version = ?
-                """,
-                (
-                    agent.model_dump_json(),
-                    agent_id,
-                    owner_id,
-                    expected_version,
-                ),
+        with self.session_factory.begin() as session:
+            result = session.execute(
+                update(AgentModel)
+                .where(
+                    AgentModel.id == agent_id,
+                    AgentModel.owner_id == owner_id,
+                    AgentModel.version == expected_version,
+                )
+                .values(
+                    configuration=agent.model_dump_json(),
+                    approval_status="draft",
+                    approved_by=None,
+                    approved_at=None,
+                    version=AgentModel.version + 1,
+                    updated_at=func.now(),
+                )
             )
 
-            if cursor.rowcount != 1:
-                return None
+            changed = result.rowcount == 1
+
+        if not changed:
+            return None
 
         mcp_cache.invalidate_agent(agent_id)
         return agent
@@ -432,32 +304,31 @@ class AgentRegistry:
         agent_id: str,
         owner_id: str | None = None,
     ) -> bool:
-        """Delete an agent and invalidate its cached results after commit.
+        """Delete an agent and invalidate its cache after commit.
 
         Args:
             agent_id (str): Identifier of the agent to delete.
-            owner_id (str | None): Required owner for scoped deletion.
-                None preserves unrestricted internal registry deletion.
+            owner_id (str | None): Optional ownership restriction.
+                None permits unrestricted internal deletion.
 
         Returns:
             bool: True if the agent was deleted, otherwise False.
 
         Raises:
-            sqlite3.Error: If database deletion fails.
+            SQLAlchemyError: If deletion fails.
         """
-        with self._connect() as connection:
-            if owner_id is None:
-                cursor = connection.execute(
-                    "DELETE FROM agents WHERE id = ?",
-                    (agent_id,),
-                )
-            else:
-                cursor = connection.execute(
-                    "DELETE FROM agents WHERE id = ? AND owner_id = ?",
-                    (agent_id, owner_id),
-                )
+        statement = delete(AgentModel).where(
+            AgentModel.id == agent_id
+        )
 
-            deleted = cursor.rowcount > 0
+        if owner_id is not None:
+            statement = statement.where(
+                AgentModel.owner_id == owner_id
+            )
+
+        with self.session_factory.begin() as session:
+            result = session.execute(statement)
+            deleted = result.rowcount > 0
 
         if deleted:
             mcp_cache.invalidate_agent(agent_id)
@@ -481,30 +352,26 @@ class AgentRegistry:
             bool: Whether submission succeeded.
 
         Raises:
-            sqlite3.Error: If the database update fails.
+            SQLAlchemyError: If the database update fails.
         """
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE agents
-                SET
-                    approval_status = 'pending',
-                    approved_by = NULL,
-                    approved_at = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND owner_id = ?
-                  AND approval_status = 'draft'
-                  AND version = ?
-                """,
-                (
-                    agent_id,
-                    owner_id,
-                    expected_version,
-                ),
+        with self.session_factory.begin() as session:
+            result = session.execute(
+                update(AgentModel)
+                .where(
+                    AgentModel.id == agent_id,
+                    AgentModel.owner_id == owner_id,
+                    AgentModel.approval_status == "draft",
+                    AgentModel.version == expected_version,
+                )
+                .values(
+                    approval_status="pending",
+                    approved_by=None,
+                    approved_at=None,
+                    updated_at=func.now(),
+                )
             )
 
-            changed = cursor.rowcount == 1
+            changed = result.rowcount == 1
 
         if changed:
             mcp_cache.invalidate_agent(agent_id)
@@ -528,32 +395,27 @@ class AgentRegistry:
             bool: Whether approval succeeded.
 
         Raises:
-            sqlite3.Error: If the database update fails.
+            SQLAlchemyError: If the database update fails.
         """
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE agents
-                SET
-                    approval_status = 'approved',
-                    approved_by = ?,
-                    approved_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND approval_status = 'pending'
-                  AND version = ?
-                  AND owner_id IS NOT NULL
-                  AND owner_id != ?
-                """,
-                (
-                    reviewer_id,
-                    agent_id,
-                    expected_version,
-                    reviewer_id,
-                ),
+        with self.session_factory.begin() as session:
+            result = session.execute(
+                update(AgentModel)
+                .where(
+                    AgentModel.id == agent_id,
+                    AgentModel.approval_status == "pending",
+                    AgentModel.version == expected_version,
+                    AgentModel.owner_id.is_not(None),
+                    AgentModel.owner_id != reviewer_id,
+                )
+                .values(
+                    approval_status="approved",
+                    approved_by=reviewer_id,
+                    approved_at=func.now(),
+                    updated_at=func.now(),
+                )
             )
 
-            changed = cursor.rowcount == 1
+            changed = result.rowcount == 1
 
         if changed:
             mcp_cache.invalidate_agent(agent_id)
@@ -577,31 +439,27 @@ class AgentRegistry:
             bool: Whether rejection succeeded.
 
         Raises:
-            sqlite3.Error: If the database update fails.
+            SQLAlchemyError: If the database update fails.
         """
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE agents
-                SET
-                    approval_status = 'rejected',
-                    approved_by = NULL,
-                    approved_at = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND approval_status = 'pending'
-                  AND version = ?
-                  AND owner_id IS NOT NULL
-                  AND owner_id != ?
-                """,
-                (
-                    agent_id,
-                    expected_version,
-                    reviewer_id,
-                ),
+        with self.session_factory.begin() as session:
+            result = session.execute(
+                update(AgentModel)
+                .where(
+                    AgentModel.id == agent_id,
+                    AgentModel.approval_status == "pending",
+                    AgentModel.version == expected_version,
+                    AgentModel.owner_id.is_not(None),
+                    AgentModel.owner_id != reviewer_id,
+                )
+                .values(
+                    approval_status="rejected",
+                    approved_by=None,
+                    approved_at=None,
+                    updated_at=func.now(),
+                )
             )
 
-            changed = cursor.rowcount == 1
+            changed = result.rowcount == 1
 
         if changed:
             mcp_cache.invalidate_agent(agent_id)
