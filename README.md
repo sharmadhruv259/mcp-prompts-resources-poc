@@ -1,12 +1,43 @@
 # MCP Playground — FastAPI, Groq & Model Context Protocol
 
+![Python](https://img.shields.io/badge/Python-FastAPI-009688?logo=fastapi&logoColor=white)
+![MCP](https://img.shields.io/badge/Protocol-MCP-6366F1)
+![Groq](https://img.shields.io/badge/LLM-Groq-F55036)
+![SQLite](https://img.shields.io/badge/Storage-SQLite-003B57?logo=sqlite&logoColor=white)
+
 A full-stack proof of concept demonstrating how AI agents can dynamically discover and interact with **MCP Tools, Resources, and Prompts** using Groq's native function-calling capabilities.
 
-The application supports custom agent creation, configurable system prompts, automatic and manual MCP operation selection, execution tracking, and result caching.
+The application supports **authenticated users with role-based access**, custom agent creation with an **approval workflow**, configurable system prompts, automatic and manual MCP operation selection, execution tracking, result caching, and administrative management of users and MCP tools.
 
 The backend is built with **Python, FastAPI, FastMCP, and Groq**, while the frontend uses **Next.js, React, and TypeScript**.
 
 No LangChain is required.
+
+---
+
+## Table of Contents
+
+1. [Project Overview](#1-project-overview)
+2. [System Architecture](#2-system-architecture)
+3. [Backend Project Structure](#3-backend-project-structure)
+4. [Authentication and Roles](#4-authentication-and-roles)
+5. [MCP Server](#5-mcp-server)
+6. [Dynamic MCP Discovery and Groq Schemas](#6-dynamic-mcp-discovery-and-groq-schemas)
+7. [Default Assistant and Custom AI Agents](#7-default-assistant-and-custom-ai-agents)
+8. [Agent Approval Workflow](#8-agent-approval-workflow)
+9. [Auto and Manual Modes](#9-auto-and-manual-modes)
+10. [MCP Dispatcher](#10-mcp-dispatcher)
+11. [MCP Result Caching](#11-mcp-result-caching)
+12. [Tool Management](#12-tool-management)
+13. [Frontend Overview](#13-frontend-overview)
+14. [Backend API](#14-backend-api)
+15. [Installation and Setup](#15-installation-and-setup)
+16. [Running Backend Tests](#16-running-backend-tests)
+17. [End-to-End Testing](#17-end-to-end-testing)
+18. [Out-of-Scope Handling](#18-out-of-scope-handling)
+19. [Error Handling](#19-error-handling)
+20. [Known Limitations](#20-known-limitations)
+21. [Conclusion](#21-conclusion)
 
 ---
 
@@ -18,14 +49,17 @@ The system supports:
 
 - Dynamic discovery of MCP Tools, Resources, and Prompts.
 - Groq-based tool selection and execution.
+- Token-based authentication with User, Manager, and Admin roles.
+- A **Default Assistant** for general chat without MCP tools.
 - Creation and management of custom AI agents.
+- An approval workflow (Draft, Pending, Approved, Rejected) reviewed by Admins and Managers.
 - Custom system instructions for each agent.
 - Agent-specific MCP tool permissions.
 - Automatic and manual operation selection.
 - MCP execution logs displayed in the frontend.
 - Caching of supported MCP operations.
-- SQLite persistence for custom agent configurations.
-- Multiple agents with different responsibilities.
+- Administrative management of users, managers, and MCP tools.
+- SQLite persistence for agents, users, and tool settings.
 
 The primary objective is to demonstrate MCP integration without relying on hardcoded keyword-based routing.
 
@@ -40,12 +74,14 @@ Repository: `mcp-prompts-resources-poc`
 Responsible for:
 
 - FastAPI endpoints.
+- Authentication, tokens, and role-based permissions.
+- User, manager, and tool management.
 - MCP server registration.
 - MCP capability discovery.
-- Groq agent orchestration.
+- Groq agent orchestration and the Default Assistant.
 - Function schema adaptation.
 - MCP operation execution.
-- Custom agent management.
+- Custom agent management and approval status.
 - Result caching.
 
 ### Frontend
@@ -54,13 +90,13 @@ Repository: `mcp-playground-frontend`
 
 Responsible for:
 
-- Custom agent creation and selection.
-- Agent configuration.
+- Sign-in and role-based views.
+- Custom agent creation, submission, and selection.
 - Chat interface.
 - Auto and Manual mode selection.
 - MCP capability selection.
 - Execution log visualization.
-- Displaying agent responses and errors.
+- Admin and Manager dashboards.
 
 ### Request Flow
 
@@ -74,52 +110,53 @@ Responsible for:
                   FastAPI
                    api.py
                       |
-             +--------+--------+
-             |                 |
-             v                 v
-       Agent Registry       MCP Discovery
-        (SQLite)                |
-             |                  |
-             +--------+---------+
-                      |
                       v
-                  agent.py
-             Groq Orchestration
+             Auth Dependencies
+        (token verification + role checks)
                       |
-                      v
-               tool_schemas.py
-            Dynamic Schema Adapter
-                      |
-                      v
-               Groq Function API
-                      |
-                      v
-                Tool Selection
-                      |
-                      v
-               MCP Dispatcher
-                      |
-                Cache Check
-                      |
-                      v
-                MCP Client
-                      |
-                      v
-                  server.py
-                  FastMCP
-                      |
-           +----------+----------+
-           |          |          |
-           v          v          v
-         Tools     Resources    Prompts
-           |          |          |
-           +----------+----------+
-                      |
-                      v
-                MCP Results
-                      |
-                      v
-                Groq Agent
+          +-----------+-----------+
+          |                       |
+          v                       v
+   Default Assistant        Agent Registry
+   (no MCP tools)             (SQLite)
+          |                       |
+          |                       v
+          |                MCP Discovery
+          |                       |
+          |                       v
+          |                   agent.py
+          |              Groq Orchestration
+          |                       |
+          |                       v
+          |                tool_schemas.py
+          |             Dynamic Schema Adapter
+          |                       |
+          |                       v
+          |                Groq Function API
+          |                       |
+          |                       v
+          |                Tool Selection
+          |                       |
+          |                       v
+          |                MCP Dispatcher
+          |                       |
+          |                 Cache Check
+          |                       |
+          |                       v
+          |                  MCP Client
+          |                       |
+          |                       v
+          |                   server.py
+          |                    FastMCP
+          |                       |
+          |            +----------+----------+
+          |            |          |          |
+          |            v          v          v
+          |          Tools     Resources   Prompts
+          |            |          |          |
+          |            +----------+----------+
+          |                       |
+          +-----------+-----------+
                       |
                       v
                 FastAPI Response
@@ -135,35 +172,55 @@ The backend uses an in-process MCP client connection, so the current application
 ```text
 mcp-prompts-resources-poc/
 │
-├── api.py
-├── agent.py
-├── server.py
-├── prompts.py
-├── tool_schemas.py
+├── api.py                          # FastAPI application and core endpoints
+├── agent.py                        # Groq calls, tool execution, agent responses
+├── server.py                       # FastMCP tools and resources
+├── prompts.py                      # Reusable MCP prompts
+├── tool_schemas.py                 # Groq-compatible function definitions
 ├── client.py
 │
+├── auth/
+│   ├── routes.py                   # Authentication routes
+│   ├── tokens.py                   # Access token creation and verification
+│   ├── dependencies.py             # FastAPI dependencies (current user)
+│   ├── permissions.py              # Role-based permission checks
+│   ├── admin_routes.py             # Admin-only routes
+│   ├── user_management_routes.py   # User and manager account management
+│   └── tool_management_routes.py   # MCP tool management
+│
 ├── constants/
-│   ├── config.py
+│   ├── config.py                   # Application and Groq configuration
 │   ├── instructions.py
-│   └── paths.py
+│   ├── paths.py
+│   └── system_prompts.py           # System prompt templates
 │
 ├── models/
-│   └── agent_config.py
+│   └── agent_config.py             # Agent configuration models
 │
 ├── services/
-│   ├── agent_registry.py
-│   ├── mcp_cache.py
-│   ├── mcp_discovery.py
-│   └── mcp_dispatcher.py
+│   ├── agent_registry.py           # Agent persistence and approval status
+│   ├── default_assistant.py        # General chat without MCP tools
+│   ├── mcp_cache.py                # TTL-based MCP result cache
+│   ├── mcp_discovery.py            # MCP capability discovery
+│   ├── mcp_dispatcher.py           # MCP operation execution
+│   ├── tool_registry.py            # Registered tools and availability
+│   └── user_service.py             # User account operations
+│
+├── scripts/
+│   └── bootstrap_admin.py          # Creates the first administrator account
 │
 ├── data/
-│   ├── requirements.md
-│   ├── architecture.md
-│   └── agents.db
+│   ├── requirements.md             # Source for project://requirements
+│   ├── architecture.md             # Source for project://architecture
+│   └── agents.db                   # SQLite database
 │
+├── backups/
 ├── tests/
 │
+├── Dockerfile
+├── .dockerignore
 ├── requirements.txt
+├── .env.example
 ├── .env
 ├── .gitignore
 └── README.md
@@ -173,22 +230,61 @@ mcp-prompts-resources-poc/
 
 | File | Responsibility |
 |---|---|
-| `api.py` | Defines FastAPI endpoints for agents, chat, and MCP discovery |
+| `api.py` | Defines FastAPI endpoints and registers the route modules |
 | `agent.py` | Handles Groq calls, tool execution, and agent responses |
 | `server.py` | Registers native MCP tools and resources |
 | `prompts.py` | Defines reusable MCP prompts |
 | `tool_schemas.py` | Generates Groq-compatible function definitions |
+| `auth/routes.py` | Authentication endpoints |
+| `auth/tokens.py` | Creates and verifies access tokens |
+| `auth/dependencies.py` | Resolves the current user for protected endpoints |
+| `auth/permissions.py` | Enforces role-based access |
+| `auth/admin_routes.py` | Admin-only endpoints |
+| `auth/user_management_routes.py` | Manages User and Manager accounts |
+| `auth/tool_management_routes.py` | Manages MCP tool descriptions and availability |
 | `models/agent_config.py` | Defines custom agent configuration models |
-| `services/agent_registry.py` | Manages agent persistence using SQLite |
+| `services/agent_registry.py` | Manages agent persistence and approval status using SQLite |
+| `services/default_assistant.py` | Handles general chat when no custom agent is selected |
 | `services/mcp_discovery.py` | Discovers MCP tools, resources, and prompts |
 | `services/mcp_dispatcher.py` | Executes MCP operations |
 | `services/mcp_cache.py` | Manages cached MCP results |
+| `services/tool_registry.py` | Tracks registered tools and their availability |
+| `services/user_service.py` | Creates, updates, and looks up user accounts |
 | `constants/config.py` | Application and Groq configuration |
+| `constants/system_prompts.py` | System prompt templates |
+| `scripts/bootstrap_admin.py` | Creates the initial administrator account |
 | `data/agents.db` | Stores custom agent configurations |
 
 `client.py` and some constants modules remain subject to the planned backend cleanup. Their continued use should be verified before removal.
 
-## 4. MCP Server
+## 4. Authentication and Roles
+
+The backend uses token-based authentication. Protected endpoints verify the access token and the caller's role before running.
+
+### Roles
+
+| Capability | User | Manager | Admin |
+|---|:---:|:---:|:---:|
+| Chat with the Default Assistant or approved agents | ✅ | ✅ | ✅ |
+| Create, edit, and delete agents; submit them for approval | ✅ | ✅ | ✅ |
+| Review, approve, and reject submitted agents | — | ✅ | ✅ |
+| Manage regular User accounts | — | ✅ | ✅ |
+| Manage Manager accounts | — | — | ✅ |
+| Manage MCP tools (descriptions and availability) | — | — | ✅ |
+
+Permissions are enforced on the backend. The frontend hides restricted sections, but access is never decided by the frontend alone.
+
+### Creating the First Administrator
+
+Run the bootstrap script once after setting up the environment:
+
+```bash
+python -m scripts.bootstrap_admin
+```
+
+The initial administrator can then create Manager and User accounts from the Admin dashboard.
+
+## 5. MCP Server
 
 The MCP server is implemented using FastMCP.
 
@@ -198,15 +294,15 @@ It exposes three types of capabilities:
 2. MCP Resources
 3. MCP Prompts
 
-### 4.1 MCP Tools
+### 5.1 MCP Tools
 
-The server exposes a native tool:
+The server exposes native tools, such as:
 
 **`get_project_overview`**
 
 Purpose: Retrieve an overview of the project.
 
-The Groq-facing function name is prefixed as:
+Native tools are discovered dynamically. Their Groq-facing function names are prefixed, for example:
 
 ```text
 mcp_tool__get_project_overview
@@ -214,7 +310,7 @@ mcp_tool__get_project_overview
 
 The dispatcher removes the prefix before executing the native MCP tool.
 
-### 4.2 MCP Resources
+### 5.2 MCP Resources
 
 Resources expose project information that can be retrieved through the MCP client.
 
@@ -227,7 +323,7 @@ These resources allow agents to retrieve project information without embedding t
 
 Resource contents can be updated by editing the corresponding Markdown files.
 
-### 4.3 MCP Prompts
+### 5.3 MCP Prompts
 
 The server exposes two reusable prompts.
 
@@ -241,7 +337,7 @@ Provides reusable instructions for explaining technical project information.
 
 Prompt names and argument definitions are discovered from the MCP server.
 
-## 5. Dynamic MCP Discovery and Groq Schemas
+## 6. Dynamic MCP Discovery and Groq Schemas
 
 The application dynamically discovers MCP capabilities through `services/mcp_discovery.py`.
 
@@ -257,17 +353,21 @@ The discovered capabilities include:
 
 | Function | Purpose |
 |---|---|
-| `mcp_tool__get_project_overview` | Execute the native MCP overview tool |
+| `mcp_tool__<tool_name>` | Execute a native MCP tool (for example, `mcp_tool__get_project_overview`) |
 | `read_mcp_resource` | Retrieve an MCP resource |
 | `get_mcp_prompt` | Retrieve reusable MCP prompt instructions |
 
-The native MCP tool's input schema is obtained from discovery.
+Each native tool's input schema is obtained from discovery. Resource URIs and prompt names are also discovered dynamically.
 
-Resource URIs and prompt names are also discovered dynamically.
+The schema adapter translates MCP capabilities into the function format required by Groq. It is not intended to duplicate the MCP server's definitions.
 
-The schema adapter is responsible for translating MCP capabilities into the function format required by Groq. It is not intended to duplicate the MCP server's definitions.
+## 7. Default Assistant and Custom AI Agents
 
-## 6. Custom AI Agents
+### Default Assistant
+
+When no custom agent is selected, requests are handled by the **Default Assistant** (`services/default_assistant.py`). It answers general questions through Groq and does not execute MCP tools.
+
+### Custom Agents
 
 The application supports creating and managing multiple custom agents.
 
@@ -279,6 +379,7 @@ Each agent can have its own:
 - MCP tool access configuration.
 - Allowed MCP tools.
 - Cache settings.
+- Approval status.
 
 Custom agent configurations are stored in SQLite.
 
@@ -308,10 +409,10 @@ Typical responsibilities:
 
 ### Agent Execution
 
-When a user selects an agent:
+When a user selects an approved agent:
 
-1. The frontend sends the selected agent and user message to FastAPI.
-2. The backend retrieves the agent configuration.
+1. The frontend sends the selected agent and user message to FastAPI with the user's access token.
+2. The backend verifies the token and retrieves the agent configuration.
 3. The agent's system instructions are applied.
 4. Permitted MCP capabilities are prepared for Groq.
 5. Groq selects relevant operations.
@@ -321,7 +422,30 @@ When a user selects an agent:
 
 Agents share the same underlying MCP server but can have different instructions and native tool permissions.
 
-## 7. Auto and Manual Modes
+## 8. Agent Approval Workflow
+
+Custom agents must be approved before they can run.
+
+```text
+  Create / Edit            Submit for Approval           Review
+  ┌────────┐             ┌──────────────┐          ┌──────────────┐
+  │ Draft  │ ──────────► │   Pending    │ ───────► │   Approved   │
+  └────────┘             └──────────────┘    │     └──────────────┘
+                                             │     ┌──────────────┐
+                                             └───► │   Rejected   │
+                                                   └──────────────┘
+```
+
+| Status | Meaning |
+|---|---|
+| Draft | Saved but not yet submitted for review |
+| Pending | Waiting for Admin or Manager approval |
+| Approved | Available for selection and execution |
+| Rejected | Declined by a reviewer |
+
+Admins and Managers review submissions from the **Agent Reviews** section of their dashboard.
+
+## 9. Auto and Manual Modes
 
 The frontend provides two operation-selection modes.
 
@@ -350,7 +474,7 @@ Resource and prompt selection is not yet fully enforced in the same way.
 
 This is a known limitation of the current implementation.
 
-## 8. MCP Dispatcher
+## 10. MCP Dispatcher
 
 The MCP dispatcher is implemented in:
 
@@ -368,7 +492,7 @@ It handles:
 
 The dispatcher provides a common execution layer between Groq's requested functions and the MCP client.
 
-## 9. MCP Result Caching
+## 11. MCP Result Caching
 
 The application includes a TTL-based cache in:
 
@@ -384,70 +508,38 @@ The cache supports applicable resource and prompt retrieval operations.
 
 Cache behavior depends on the selected agent configuration and the operation being executed.
 
-## 10. Frontend Architecture
+## 12. Tool Management
 
-The frontend is implemented using Next.js, React, TypeScript, and Tailwind CSS.
+Admins can manage the registered MCP tools through `auth/tool_management_routes.py` and `services/tool_registry.py`, using the **Tool Management** section of the Admin dashboard.
 
-### Project Structure
+Admins can:
 
-```text
-mcp-playground-frontend/
-│
-├── app/
-│   ├── page.tsx
-│   ├── layout.tsx
-│   └── globals.css
-│
-├── src/
-│   ├── components/
-│   │   ├── agents/
-│   │   │   └── AgentForm.tsx
-│   │   ├── chat/
-│   │   │   └── ChatPanel.tsx
-│   │   ├── execution/
-│   │   │   └── ExecutionLog.tsx
-│   │   ├── layout/
-│   │   │   └── Sidebar.tsx
-│   │   └── tools/
-│   │       └── ToolSelector.tsx
-│   │
-│   ├── hooks/
-│   │   ├── useAgents.ts
-│   │   └── useMCPCapabilities.ts
-│   │
-│   ├── lib/
-│   │   └── api.ts
-│   │
-│   ├── constants/
-│   │   └── starters.ts
-│   │
-│   └── types/
-│       ├── agents.ts
-│       ├── chat.ts
-│       ├── mcp.ts
-│       └── tools.ts
-│
-├── package.json
-├── .env.example
-└── README.md
-```
+- View registered MCP tools.
+- Edit tool descriptions.
+- Enable or disable operations.
 
-### Frontend Features
+Tool management is restricted to the Admin role. Managers cannot access it.
+
+## 13. Frontend Overview
+
+The frontend is implemented using Next.js, React, TypeScript, and Tailwind CSS. It is maintained in the separate `mcp-playground-frontend` repository, which documents its project structure, components, and UI in detail.
 
 The interface contains three main panels.
 
-**Left Panel — Agent and Tool Configuration**
+**Left Panel — Agents, Tools, and Account**
 
-- Select an existing agent.
-- Create and configure custom agents.
+- Select the Default Assistant or an approved agent.
+- Create and configure custom agents, and submit them for approval.
+- View Draft, Pending, and Rejected agents.
 - Switch between Auto and Manual modes.
-- Select MCP operations.
+- Browse available MCP tools.
+- Sign in or out.
 
 **Center Panel — Chat**
 
 - Enter questions.
-- View AI-generated answers.
-- Interact with the selected agent.
+- View AI-generated answers rendered as Markdown.
+- Interact with the Default Assistant or the selected agent.
 
 **Right Panel — Execution Log**
 
@@ -456,34 +548,36 @@ The interface contains three main panels.
 - View execution results and errors.
 - Observe cache behavior when reported.
 
-## 11. Backend API
+Admins and Managers also have dashboards for user management, agent reviews, and (Admin only) manager and tool management.
+
+## 14. Backend API
 
 The FastAPI application exposes the following endpoint groups.
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/mcp/capabilities` | Retrieve discovered MCP capabilities |
-| `/api/agents` | Manage custom agent configurations |
-| `POST /api/chat` | Execute a question using the selected agent |
+| `/api/agents` | Manage custom agent configurations and submit them for approval |
+| `POST /api/chat` | Execute a question using the Default Assistant or the selected agent |
 
-The `/api/agents` group supports the application's agent-management operations.
+Authentication, agent review, user management, and tool management endpoints are provided by the route modules in the `auth/` package.
 
-For the complete generated API documentation, visit:
+For the complete generated API documentation, including all authentication and admin routes, visit:
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-## 12. Installation and Setup
+## 15. Installation and Setup
 
 ### Prerequisites
 
 - Python environment compatible with the backend dependencies.
-- Node.js and npm.
+- Node.js and npm (for the frontend).
 - Groq API key.
 - Git.
 
-### 12.1 Backend Setup
+### 15.1 Backend Setup
 
 Clone the backend repository and open its directory.
 
@@ -509,14 +603,26 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Create a `.env` file:
+Create a `.env` file from the template:
+
+```bash
+cp .env.example .env
+```
+
+Set at least:
 
 ```env
 GROQ_API_KEY=your_groq_api_key_here
 GROQ_MODEL=openai/gpt-oss-20b
 ```
 
-Use a Groq model supported by your account and compatible with tool calling.
+Add any authentication settings listed in `.env.example`. Use a Groq model supported by your account and compatible with tool calling.
+
+Create the first administrator account:
+
+```bash
+python -m scripts.bootstrap_admin
+```
 
 Start the FastAPI backend:
 
@@ -536,7 +642,7 @@ API documentation:
 http://127.0.0.1:8000/docs
 ```
 
-### 12.2 Frontend Setup
+### 15.2 Frontend Setup
 
 Open a separate terminal.
 
@@ -566,9 +672,18 @@ http://localhost:3000
 
 Ensure the FastAPI backend is running before testing MCP operations from the frontend.
 
-## 13. Running Backend Tests
+### 15.3 Docker
 
-The backend includes automated tests covering MCP integration, agent execution, schema handling, caching, and related functionality.
+A `Dockerfile` is included for containerized runs.
+
+```bash
+docker build -t mcp-playground-backend .
+docker run --env-file .env -p 8000:8000 mcp-playground-backend
+```
+
+## 16. Running Backend Tests
+
+The backend includes automated tests covering MCP integration, agent execution, schema handling, caching, authentication, and related functionality.
 
 Run:
 
@@ -576,16 +691,16 @@ Run:
 python -m pytest -q
 ```
 
-The backend previously reached **63 passing tests**.
+Rerun the test suite after any changes to authentication, schema generation, MCP dispatching, agent execution, or API behavior.
 
-The test suite should be rerun after any changes to schema generation, MCP dispatching, agent execution, or API behavior.
-
-## 14. End-to-End Testing
+## 17. End-to-End Testing
 
 The final testing workflow covers two custom agents:
 
 1. Project Assistant
 2. Project Technical Analyst
+
+Before testing, sign in and make sure both agents are in the **Approved** state.
 
 ### Project Assistant Tests
 
@@ -656,7 +771,15 @@ Verify that:
 - Tool permissions remain agent-specific.
 - Switching agents does not accidentally reuse the previous agent's configuration.
 
-## 15. Out-of-Scope Handling
+### Authentication and Approval Testing
+
+- Calling a protected endpoint without a valid token is rejected.
+- A Manager cannot reach Admin-only endpoints (manager management, tool management).
+- A Draft or Pending agent cannot run until it is approved.
+- A Rejected agent cannot run.
+- Disabling a tool as an Admin removes it from the available operations.
+
+## 18. Out-of-Scope Handling
 
 Custom agents are intended to answer questions relevant to their configured responsibilities.
 
@@ -681,10 +804,11 @@ This should be handled separately from genuine backend execution errors.
 
 System-prompt instructions alone do not guarantee that an LLM will reject every unrelated question.
 
-## 16. Error Handling
+## 19. Error Handling
 
 The application should distinguish between:
 
+- Unauthenticated or unauthorized requests.
 - Unsupported or unavailable MCP operations.
 - Invalid MCP arguments.
 - Missing resources or prompts.
@@ -692,7 +816,7 @@ The application should distinguish between:
 - Agent execution failures.
 - Out-of-scope user requests.
 
-The frontend should display meaningful error messages.
+The frontend displays meaningful error messages.
 
 For example, a genuine backend failure may be reported as:
 
@@ -704,6 +828,8 @@ Check the backend logs.
 Out-of-scope questions should instead receive an appropriate agent-level response.
 
 
+## 20. Conclusion
+
 The project uses the MCP server as the source of truth for available capabilities while adapting discovered definitions into the format required by Groq.
 
-This provides a foundation for experimenting with MCP-enabled AI agents and extending the system with additional tools, resources, prompts, and agent configurations.
+Together with token-based authentication, role-based permissions, an agent approval workflow, and administrative tool management, this provides a foundation for experimenting with MCP-enabled AI agents and extending the system with additional tools, resources, prompts, and agent configurations.
