@@ -1,7 +1,6 @@
 
 """Provide FastAPI authentication and authorization dependencies."""
 
-import os
 from collections.abc import Callable
 
 from fastapi import Depends, HTTPException, status
@@ -21,20 +20,18 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_user_service() -> UserService:
-    """Initialize user storage using the configured database.
+    """Initialize the PostgreSQL-backed user service.
 
     Args:
         None.
 
     Returns:
-        UserService: Initialized user storage service.
+        UserService: Initialized PostgreSQL user service.
 
     Raises:
-        OSError: If the database directory is inaccessible.
+        SQLAlchemyError: If PostgreSQL initialization fails.
     """
-    return UserService(
-        os.getenv("DATABASE_PATH", "data/agents.db")
-    )
+    return UserService()
 
 
 def current_user(
@@ -48,7 +45,7 @@ def current_user(
     Args:
         credentials (HTTPAuthorizationCredentials | None):
             Bearer credentials from the request.
-        service (UserService): User storage service.
+        service (UserService): PostgreSQL-backed user service.
 
     Returns:
         User: Authenticated and active user.
